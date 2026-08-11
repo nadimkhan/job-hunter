@@ -16,6 +16,7 @@ import aiosqlite
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -145,43 +146,47 @@ def _apply_cron_toggles():
             if job:
                 if enabled and job.next_run_time is None:
                     job.resume()
-                    log(f"Cron job '{job_id}' resumed from DB state")
+                    log.info(f"Cron job '{job_id}' resumed from DB state")
                 elif not enabled and job.next_run_time is not None:
                     job.pause()
-                    log(f"Cron job '{job_id}' paused from DB state")
+                    log.info(f"Cron job '{job_id}' paused from DB state")
     except Exception as e:
-        log(f"Warning: could not read cron toggles: {e}")
+        log.warning(f"Could not read cron toggles: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
-    log("Database initialised")
+    log.info("Database initialised")
 
     # Schedule cron jobs (all added paused, then DB state applied)
-    scheduler.add_job(cron_daily_digest, "cron", hour=8, minute=0,
+    scheduler.add_job(cron_daily_digest, CronTrigger(hour=8, minute=0),
                       id="daily_digest", replace_existing=True, paused=True)
     scheduler.add_job(cron_collect, IntervalTrigger(hours=8),
                       id="collect_8h", replace_existing=True, paused=True)
     scheduler.start()
     _apply_cron_toggles()
-    log("Scheduler started (daily_digest at 08:00 UTC, collection every 8h)")
+    log.info("Scheduler started (daily_digest at 08:00 UTC, collection every 8h)")
 
-    # Start Telegram bot in background
+    # Start Telegram bot in background (PTB v21 uses initialize/start/stop, not run)
     if TELEGRAM_BOT_TOKEN:
         from bot.handlers import setup_bot
         global BOT_INSTANCE
         bot_app = setup_bot()
-        asyncio.create_task(bot_app.run())
+        await bot_app.initialize()
+        asyncio.create_task(bot_app.start())
         BOT_INSTANCE = bot_app
-        log("Telegram bot started")
+        log.info("Telegram bot started")
 
     yield
 
     # Shutdown
     scheduler.shutdown(wait=False)
-    log("Scheduler stopped")
+    if BOT_INSTANCE:
+        await BOT_INSTANCE.stop()
+        await BOT_INSTANCE.shutdown()
+    log.info("Scheduler stopped")
 
 
 # ── FastAPI App ─────────────────────────────────────────────────────────────────
@@ -197,7 +202,9 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def render(template_name: str, request: Request, **kwargs):
     return templates.TemplateResponse(
-        template_name, {"request": request, **kwargs}
+        request=request,
+        name=template_name,
+        context=kwargs,
     )
 
 
