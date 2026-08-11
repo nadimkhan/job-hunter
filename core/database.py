@@ -206,6 +206,13 @@ DEFAULT_PROFILE_CONFIG = {
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(INIT_SQL)
+        await db.execute("""CREATE TABLE IF NOT EXISTS cron_toggles (
+            job_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""")
+        await db.execute("""INSERT OR IGNORE INTO cron_toggles (job_id, enabled) VALUES
+            ('collect_8h', 1), ('daily_digest', 1)""")
         await db.commit()
 
         # Seed default profile if none exist
@@ -695,3 +702,20 @@ async def get_last_runs(db, limit=5):
     rows = await cursor.fetchall()
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in rows]
+
+
+async def get_cron_toggles(db):
+    """Returns dict of job_id -> enabled (bool)."""
+    cursor = await db.execute("SELECT job_id, enabled FROM cron_toggles")
+    rows = await cursor.fetchall()
+    return {row[0]: bool(row[1]) for row in rows}
+
+
+async def set_cron_toggle(db, job_id: str, enabled: bool):
+    """Enable or disable a cron job by ID."""
+    await db.execute(
+        "INSERT OR REPLACE INTO cron_toggles (job_id, enabled, updated_at) VALUES (?, ?, datetime('now'))",
+        (job_id, 1 if enabled else 0),
+    )
+    await db.commit()
+

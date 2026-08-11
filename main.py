@@ -34,7 +34,7 @@ from core.database import (
     get_resumes, insert_resume, delete_resume,
     get_outreach, insert_outreach, update_outreach_status, outreach_exists_for_job,
     upsert_company, get_companies, get_api_usage, get_last_runs,
-    log_daily_run,
+    log_daily_run, get_cron_toggles, set_cron_toggle,
 )
 from core.collector import run_collection, run_firecrawl_url
 from core.hunter import build_linkedin_searches, generate_dm_template
@@ -132,18 +132,40 @@ async def cron_collect():
 
 
 # ── Lifespan: startup / shutdown ───────────────────────────────────────────────
+def _apply_cron_toggles():
+    """Read DB toggles and apply pause/resume to APScheduler jobs."""
+    import sqlite3
+    from config.settings import DB_PATH
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("SELECT job_id, enabled FROM cron_toggles").fetchall()
+        conn.close()
+        for job_id, enabled in rows:
+            job = scheduler.get_job(job_id)
+            if job:
+                if enabled and job.next_run_time is None:
+                    job.resume()
+                    log(f"Cron job '{job_id}' resumed from DB state")
+                elif not enabled and job.next_run_time is not None:
+                    job.pause()
+                    log(f"Cron job '{job_id}' paused from DB state")
+    except Exception as e:
+        log(f"Warning: could not read cron toggles: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     log("Database initialised")
 
-    # Schedule cron jobs
+    # Schedule cron jobs (all added paused, then DB state applied)
     scheduler.add_job(cron_daily_digest, "cron", hour=8, minute=0,
-                      id="daily_digest", replace_existing=True)
+                      id="daily_digest", replace_existing=True, paused=True)
     scheduler.add_job(cron_collect, IntervalTrigger(hours=8),
-                      id="collect_8h", replace_existing=True)
+                      id="collect_8h", replace_existing=True, paused=True)
     scheduler.start()
+    _apply_cron_toggles()
     log("Scheduler started (daily_digest at 08:00 UTC, collection every 8h)")
 
     # Start Telegram bot in background
@@ -203,6 +225,7 @@ async def dashboard(request: Request):
     jsearch = await get_api_usage(db, "jsearch")
     profile = await get_active_profile(db)
     last_runs = await get_last_runs(db, limit=5)
+    toggles = await get_cron_toggles(db)
     await db.close()
 
     return render("dashboard.html", request,
@@ -211,6 +234,7 @@ async def dashboard(request: Request):
         jsearch=jsearch,
         active_profile=profile,
         last_runs=last_runs,
+        cron_toggles=toggles,
     )
 
 
@@ -545,6 +569,43 @@ async def trigger_firecrawl_web(request: Request,
     name = company_name or url.split("/")[2].replace("www.", "").split(".")[0].title()
     stats = await run_firecrawl_url(url, name, profile["config"], db)
     return render("collect_result.html", request, page="firecrawl", stats=stats)
+
+
+# ── Cron Toggle API ───────────────────────────────────────
+@app.get("/api/cron/toggles")
+async def api_cron_toggles():
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    toggles = await get_cron_toggles(db)
+    await db.close()
+    # Enrich with APScheduler state
+    result = {}
+    for job_id, db_enabled in toggles.items():
+        job = scheduler.get_job(job_id)
+        result[job_id] = {
+            "enabled": db_enabled,
+            "scheduled": job is not None,
+            "paused": job.next_run_time is None if job else True,
+            "next_run": str(job.next_run_time) if job and job.next_run_time else None,
+        }
+    return result
+
+
+@app.post("/api/cron/toggle/{job_id}")
+async def api_cron_toggle(job_id: str, enabled: bool):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    await set_cron_toggle(db, job_id, enabled)
+    await db.close()
+
+    job = scheduler.get_job(job_id)
+    if job:
+        if enabled:
+            job.resume()
+        else:
+            job.pause()
+        return {"job_id": job_id, "enabled": enabled, "next_run": str(job.next_run_time) if job.next_run_time else None}
+    return {"job_id": job_id, "enabled": enabled, "scheduled": False}
 
 
 # ── Status API ────────────────────────────────────────────

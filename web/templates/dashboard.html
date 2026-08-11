@@ -60,6 +60,40 @@
   </div>
   {% endif %}
 
+  <!-- Cron Scheduler -->
+  <div class="card">
+    <h2>Scheduler</h2>
+    <p class="muted">Enable or disable background jobs. Changes take effect immediately.</p>
+    <table class="table">
+      <thead><tr><th>Job</th><th>Schedule</th><th>Last Run</th><th>Enabled</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Job Collection</strong></td>
+          <td>Every 8 hours</td>
+          <td>{{ last_runs[0].run_at[:16] if last_runs else 'Never' }}</td>
+          <td>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-collect_8h" onchange="toggleCron('collect_8h', this.checked)" {{ 'checked' if cron_toggles.get('collect_8h', True) else '' }}>
+              <span class="toggle-slider"></span>
+            </label>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>Daily Digest</strong></td>
+          <td>Daily at 08:00 UTC</td>
+          <td>—</td>
+          <td>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-daily_digest" onchange="toggleCron('daily_digest', this.checked)" {{ 'checked' if cron_toggles.get('daily_digest', True) else '' }}>
+              <span class="toggle-slider"></span>
+            </label>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p id="cron-msg" style="margin-top:8px; font-size:0.85em;" class="muted"></p>
+  </div>
+
   <!-- Last runs -->
   {% if last_runs %}
   <div class="card">
@@ -106,5 +140,22 @@
     <p class="muted">Use <code>/collect</code> or <code>/firecrawl URL</code> in Telegram to trigger manually.</p>
   </div>
 </main>
+<script>
+async function toggleCron(jobId, enabled) {
+  try {
+    const res = await fetch(`/api/cron/toggle/${jobId}?enabled=${enabled}`, { method: "POST" });
+    const data = await res.json();
+    const msg = document.getElementById("cron-msg");
+    if (msg) {
+      msg.textContent = `${jobId} ${enabled ? "enabled" : "disabled"}.`;
+      msg.style.color = "#22c55e";
+      setTimeout(() => { msg.textContent = ""; }, 3000);
+    }
+  } catch(e) {
+    const msg = document.getElementById("cron-msg");
+    if (msg) { msg.textContent = "Error updating cron state."; msg.style.color = "#ef4444"; }
+  }
+}
+</script>
 </body>
 </html>
