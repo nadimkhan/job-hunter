@@ -128,7 +128,7 @@ async def cron_collect():
         msg = f"[CRON] Collection failed: {e}"
         log.error(msg)
 
-    await send_telegram(msg, topic_id=_telegram_topic_updates)
+    await send_telegram(msg, topic_id=_telegram_topic_digest)
     log("[CRON] Collection done")
 
 

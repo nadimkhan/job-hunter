@@ -7,7 +7,7 @@ from datetime import datetime
 # Add project to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.settings import DB_PATH, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_TOPIC_UPDATES
+from config.settings import DB_PATH, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_TOPIC_DAILY_DIGEST
 from core.database import init_db, get_active_profile
 from core.collector import run_collection
 
@@ -33,7 +33,7 @@ async def main():
             await bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text="[CRON] Collection skipped: no active profile. Create one via the web UI.",
-                message_thread_id=int(TELEGRAM_TOPIC_UPDATES) if TELEGRAM_TOPIC_UPDATES else None,
+                message_thread_id=int(TELEGRAM_TOPIC_DAILY_DIGEST) if TELEGRAM_TOPIC_DAILY_DIGEST else None,
             )
         return
 
@@ -53,7 +53,7 @@ async def main():
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=msg,
-            message_thread_id=int(TELEGRAM_TOPIC_UPDATES) if TELEGRAM_TOPIC_UPDATES else None,
+            message_thread_id=int(TELEGRAM_TOPIC_DAILY_DIGEST) if TELEGRAM_TOPIC_DAILY_DIGEST else None,
         )
 
 
