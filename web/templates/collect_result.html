@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ 'Collection' if page=='collect' else 'Firecrawl' }} Result</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard">Dashboard</a>
+  <a href="/web/jobs">Jobs</a>
+  <a href="/web/profiles">Profiles</a>
+  <a href="/web/resumes">Resumes</a>
+  <a href="/web/companies">Companies</a>
+  <a href="/web/outreach">Outreach</a>
+</nav>
+
+<main class="container container-narrow">
+  <div class="page-header">
+    <h1>{{ 'Collection' if page=='collect' else 'Firecrawl' }} Result</h1>
+  </div>
+
+  <div class="card">
+    <h2>Summary</h2>
+    <table class="table">
+      <tr><td>Total Fetched</td><td><strong>{{ stats.fetched }}</strong></td></tr>
+      <tr><td>New Jobs</td><td><strong>{{ stats.new }}</strong></td></tr>
+      <tr><td>Updated</td><td><strong>{{ stats.updated }}</strong></td></tr>
+      <tr><td>Filtered Out</td><td><strong>{{ stats.filtered_out }}</strong></td></tr>
+      {% if stats.get('jsearch_used') %}
+      <tr><td>JSearch Reqs Used</td><td><strong>{{ stats.jsearch_used }}</strong></td></tr>
+      {% endif %}
+    </table>
+    <div class="form-actions">
+      <a href="/web/jobs" class="btn btn-primary">View Jobs →</a>
+      <a href="/web/dashboard" class="btn">Back to Dashboard</a>
+    </div>
+  </div>
+</main>
+</body>
+</html>

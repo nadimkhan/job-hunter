@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ 'New' if is_new else 'Edit' }} Profile — Job Hunter</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard">Dashboard</a>
+  <a href="/web/jobs">Jobs</a>
+  <a href="/web/profiles" class="active">Profiles</a>
+  <a href="/web/resumes">Resumes</a>
+  <a href="/web/companies">Companies</a>
+  <a href="/web/outreach">Outreach</a>
+</nav>
+
+<main class="container container-narrow">
+  <div class="page-header">
+    <h1>{{ 'New Profile' if is_new else 'Edit Profile' }}: {{ profile.name if profile else '' }}</h1>
+  </div>
+
+  <form method="post" action="{{ '/web/profiles/new' if is_new else '/web/profiles/' + (profile.id|string) + '/edit' }}">
+    <div class="form-group">
+      <label>Profile Name *</label>
+      <input type="text" name="name" required value="{{ profile.name if profile else '' }}" placeholder="e.g. Blockchain / Web3">
+    </div>
+
+    <div class="form-group">
+      <label>Description</label>
+      <input type="text" name="description" value="{{ profile.description if profile else '' }}"
+             placeholder="e.g. Focused on Solidity, DeFi, content roles">
+    </div>
+
+    <div class="form-group">
+      <label>YAML Config *</label>
+      <textarea name="yaml_config" rows="30" class="code-textarea" required
+placeholder="# Paste your YAML config here
+# See /web/profiles for the guide
+
+search:
+  title_keywords_positive:
+    - blockchain
+    - solidity
+    - web3
+    - smart contract
+  title_keywords_negative:
+    - intern
+    - junior
+    - frontend only
+  relevant_tech:
+    - solidity
+    - rust
+    - ethers.js
+    - hardhat
+  jsearch_default_queries:
+    - query: blockchain developer remote
+      country: us
+      date_posted: 3days
+      remote_jobs_only: true
+
+scoring:
+  weights:
+    title: 35
+    tech: 35
+    experience: 15
+    signal: 15
+  core_tech:
+    - solidity
+    - rust
+    - web3.js
+  backend_signals:
+    - defi
+    - dao
+    - nft
+  experience_bonuses:
+    mid:
+      mid: 8
+      senior: -5
+      junior: 3
+    senior:
+      senior: 8
+      mid: -3
+      junior: -10
+
+location:
+  india_positive:
+    - india
+    - asia
+    - worldwide
+    - remote
+    - global
+  india_negative:
+    - us only
+    - usa only
+    - uk only
+  timezone_compatible:
+    - ist
+    - gmt
+    - utc
+    - flexible
+    - async
+  timezone_incompatible:
+    - pst only
+    - est only
+
+outreach:
+  candidate_name: Nadim Khan
+  candidate_core_tech:
+    - solidity
+    - web3.js
+  candidate_extra_tech:
+    - react
+    - python
+  linkedin_search_titles:
+    - title: Engineering Manager
+      label: Eng Manager
+      category: engineering
+    - title: Tech Lead
+      label: Tech Lead
+      category: engineering
+    - title: CTO
+      label: CTO
+      category: executive
+  dm_short_template: '{greeting}, I noticed {company} is hiring for {title}. I have {bio_short} — solidity/Web3 focus. Open to a chat?'
+  dm_long_template: '{greeting},\n\nNoticed {company} is hiring for {title}. 3+ years in blockchain, mostly Solidity/Web3.js.\n\n{achievements}\n\nOpen to a 15-min chat?\n\nThanks,\n{candidate_name}'
+">{{ profile.config|tojson if profile else '' }}</textarea>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">{{ 'Create' if is_new else 'Save' }} Profile</button>
+      <a href="/web/profiles" class="btn">Cancel</a>
+    </div>
+  </form>
+</main>
+</body>
+</html>

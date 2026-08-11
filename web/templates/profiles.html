@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Profiles — Job Hunter</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard">Dashboard</a>
+  <a href="/web/jobs">Jobs</a>
+  <a href="/web/profiles" class="active">Profiles</a>
+  <a href="/web/resumes">Resumes</a>
+  <a href="/web/companies">Companies</a>
+  <a href="/web/outreach">Outreach</a>
+</nav>
+
+<main class="container">
+  <div class="page-header">
+    <h1>Profiles</h1>
+    <a href="/web/profiles/new" class="btn btn-primary">+ New Profile</a>
+  </div>
+
+  <div class="profiles-grid">
+    {% for profile in profiles %}
+    <div class="card profile-card {{ 'active-profile' if profile.is_active else '' }}">
+      <div class="profile-header">
+        <h2>{{ profile.name }}</h2>
+        {% if profile.is_active %}<span class="badge badge-active">ACTIVE</span>{% endif %}
+      </div>
+      <p class="muted">{{ profile.description }}</p>
+      <p class="muted small">Updated: {{ profile.updated_at[:10] if profile.updated_at else 'Never' }}</p>
+
+      {% if profile.config %}
+      {% set search = profile.config.get('search', {}) %}
+      {% set queries = search.get('jsearch_default_queries', []) %}
+      {% if queries %}
+      <div class="profile-queries">
+        <strong>JSearch Queries ({{ queries|length }})</strong>
+        {% for q in queries[:3] %}
+        <div class="query-chip">🔍 {{ q.query }} ({{ q.country }}, {{ q.date_posted }})</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% endif %}
+
+      <div class="profile-actions">
+        <a href="/web/profiles/{{ profile.id }}/edit" class="btn btn-small">Edit YAML</a>
+        {% if not profile.is_active %}
+        <form method="post" action="/web/profiles/{{ profile.id }}/activate" style="display:inline">
+          <button type="submit" class="btn btn-small btn-success">Set Active</button>
+        </form>
+        {% endif %}
+        {% if not profile.is_active %}
+        <form method="post" action="/web/profiles/{{ profile.id }}/delete" style="display:inline"
+              onsubmit="return confirm('Delete this profile?')">
+          <button type="submit" class="btn btn-small btn-danger">Delete</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h3>Profile YAML Guide</h3>
+    <p class="muted">Each profile is a YAML blob with these top-level keys:</p>
+    <ul class="muted">
+      <li><code>search</code> — title keywords, tech stack, JSearch queries</li>
+      <li><code>scoring</code> — weights, core tech, experience targets</li>
+      <li><code>location</code> — India-friendly / timezone filters</li>
+      <li><code>outreach</code> — candidate name, LinkedIn search titles, DM templates</li>
+    </ul>
+    <p class="muted">Create or edit a profile and paste valid YAML in the config box.</p>
+  </div>
+</main>
+</body>
+</html>

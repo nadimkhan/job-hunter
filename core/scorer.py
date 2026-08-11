@@ -1,242 +1,156 @@
 """Rule-based relevance scorer. No API key needed.
 Scores jobs 0-100 based on title, description, and tech stack match.
-Also detects whether a job is India-remote-friendly.
+Also detects whether a job is India/remote-friendly.
 
-All preferences (keyword lists, weights, experience target, candidate core tech)
-come from the active profile (see core.profile). Callers can pass `profile=`
-to use a specific profile for a batch — otherwise the active one is looked up.
-"""
+All preferences come from the active profile (DB-backed JSON blob)."""
 
-from core.profile import get_active_profile
+import re
 
 
-def extract_tech_stack(text: str, profile: dict = None) -> list[str]:
-    """Extract matching tech keywords from text."""
-    profile = profile or get_active_profile()
-    tech_list = profile["search"].get("relevant_tech") or []
+def extract_tech_stack(text: str, relevant_tech: list[str]) -> list[str]:
     text_lower = text.lower()
-    return [tech for tech in tech_list if tech in text_lower]
+    return [tech for tech in relevant_tech if tech in text_lower]
 
 
 def estimate_experience_level(text: str) -> str:
-    """Guess experience level from description.
-
-    These keyword lists are linguistic patterns — not user preferences — so
-    they stay hardcoded. The profile decides how the detected level is
-    *scored* via experience_bonuses, not how it's detected.
-    """
     text_lower = text.lower()
-    if any(w in text_lower for w in [
-        "intern", "internship", "trainee", "entry level", "entry-level",
-        "0-1 year", "0-2 years", "fresher", "new grad", "graduate",
-        "campus", "freshers", "b.tech", "b.e.", "mca",
-    ]):
-        # Fine-grained: distinguish "junior/fresher" from "intern/trainee"
-        if any(w in text_lower for w in ["intern", "internship", "trainee"]):
-            return "fresher"
+    fresher_kw = ["intern", "internship", "trainee", "entry level", "entry-level",
+                  "0-1 year", "0-2 years", "fresher", "new grad", "graduate",
+                  "campus", "freshers"]
+    senior_kw = ["senior", "sr.", "lead", "principal", "staff",
+                  "8+ years", "10+ years", "15+ years"]
+    junior_kw = ["junior", "jr.", "1+ year", "1-2 years"]
+
+    if any(w in text_lower for w in fresher_kw):
         return "fresher"
-    if any(w in text_lower for w in [
-        "senior", "sr.", "lead", "principal", "staff",
-        "8+ years", "10+ years", "15+ years",
-    ]):
+    if any(w in text_lower for w in senior_kw):
         return "senior"
-    if any(w in text_lower for w in [
-        "junior", "jr.", "1+ year", "1-2 years",
-    ]):
+    if any(w in text_lower for w in junior_kw):
         return "junior"
-    if any(w in text_lower for w in [
-        "mid", "middle", "3+ years", "2+ years", "4+ years", "5+ years",
-        "3-5 years", "2-4 years", "4-6 years",
-    ]):
-        return "mid"
     return "mid"
 
 
 def check_india_friendly(location: str, description: str,
-                         profile: dict = None) -> dict:
-    """Determine if a remote job is accessible from India.
-    Returns:
-        result: 'yes' | 'no' | 'maybe'
-        note: explanation string
-    """
-    profile = profile or get_active_profile()
-    loc_cfg = profile["location"]
-    india_pos = loc_cfg.get("india_positive") or []
-    india_neg = loc_cfg.get("india_negative") or []
-    tz_good_list = loc_cfg.get("timezone_compatible") or []
-    tz_bad_list = loc_cfg.get("timezone_incompatible") or []
-
+                         india_positive: list, india_negative: list,
+                         tz_good: list, tz_bad: list) -> dict:
     full_text = f"{location} {description}".lower()
     loc_lower = location.lower()
 
-    positive_hits = [kw for kw in india_pos if kw in full_text]
-    negative_hits = [kw for kw in india_neg if kw in full_text]
-    tz_good = [kw for kw in tz_good_list if kw in full_text]
-    tz_bad = [kw for kw in tz_bad_list if kw in full_text]
+    neg_hits = [kw for kw in india_negative if kw in full_text]
+    if neg_hits:
+        return {"result": "no", "note": f"Restricted: {', '.join(neg_hits[:3])}"}
 
-    if negative_hits:
-        return {
-            "result": "no",
-            "note": f"Restricted: {', '.join(negative_hits[:3])}",
-        }
-    if tz_bad:
-        return {
-            "result": "no",
-            "note": f"Timezone mismatch: {', '.join(tz_bad[:2])}",
-        }
+    tz_neg_hits = [kw for kw in tz_bad if kw in loc_lower]
+    if tz_neg_hits:
+        return {"result": "no", "note": f"Timezone mismatch: {', '.join(tz_neg_hits[:2])}"}
 
-    india_direct = any(kw in full_text for kw in [
-        "india", "bangalore", "bengaluru", "mumbai", "hyderabad",
-        "pune", "delhi", "chennai", "kolkata", "noida", "gurgaon",
-        "gurugram", "remote - india",
-    ])
-    if india_direct:
-        return {
-            "result": "yes",
-            "note": f"India mentioned: {', '.join(positive_hits[:3])}",
-        }
+    pos_hits = [kw for kw in india_positive if kw in full_text]
+    if pos_hits:
+        return {"result": "yes", "note": f"Open: {', '.join(pos_hits[:3])}"}
 
-    global_signals = any(kw in full_text for kw in [
-        "worldwide", "anywhere", "global", "work from anywhere",
-        "location independent", "globally distributed",
-    ])
-    if global_signals:
-        note_parts = [h for h in positive_hits if h in [
-            "worldwide", "anywhere", "global", "work from anywhere",
-            "location independent", "globally distributed",
-        ]]
-        return {
-            "result": "yes",
-            "note": f"Global remote: {', '.join(note_parts[:3])}",
-        }
+    global_signals = ["worldwide", "anywhere", "global", "work from anywhere",
+                     "location independent", "globally distributed"]
+    if any(kw in full_text for kw in global_signals):
+        return {"result": "yes", "note": "Global remote"}
 
-    if any(kw in full_text for kw in ["apac", "asia", "asia pacific", "asia-pacific"]):
-        return {
-            "result": "yes",
-            "note": f"APAC region: {', '.join(positive_hits[:3])}",
-        }
-    if tz_good:
-        return {
-            "result": "maybe",
-            "note": f"Compatible timezone: {', '.join(tz_good[:2])}",
-        }
+    non_india = ["united states", "usa", "us", "canada", "uk",
+                  "europe", "eu", "germany", "france", "australia"]
+    if any(r in loc_lower for r in non_india):
+        return {"result": "no", "note": f"Restricted to: {location}"}
 
-    if "remote" in loc_lower and not any(
-        region in loc_lower for region in [
-            "us", "usa", "uk", "europe", "eu", "canada",
-            "germany", "france", "spain", "australia",
-        ]
-    ):
-        return {
-            "result": "maybe",
-            "note": "Remote — no region specified, may accept India",
-        }
-
-    non_india_regions = [
-        "united states", "usa", "us", "canada", "uk",
-        "united kingdom", "europe", "eu", "germany",
-        "france", "australia", "spain", "netherlands",
-    ]
-    if any(r in loc_lower for r in non_india_regions):
-        return {
-            "result": "no",
-            "note": f"Location restricted to: {location}",
-        }
-
-    return {
-        "result": "maybe",
-        "note": "No clear location restriction found",
-    }
+    return {"result": "maybe", "note": "No clear restriction"}
 
 
 def score_job(title: str, description: str, location: str = "",
-              profile: dict = None) -> dict:
-    """Score a job 0-100 against the active (or passed) profile."""
-    profile = profile or get_active_profile()
-    search = profile["search"]
-    scoring = profile["scoring"]
-    weights = scoring.get("weights") or {}
+              profile_config: dict = None) -> dict:
+    if profile_config is None:
+        return {"score": 0, "tech_stack": [], "experience_level": "mid",
+                "india_friendly": "unknown", "location_note": "",
+                "reasons": [], "red_flags": []}
+
+    search = profile_config.get("search", {})
+    scoring = profile_config.get("scoring", {})
+    location_cfg = profile_config.get("location", {})
+
+    pos_titles = search.get("title_keywords_positive", [])
+    neg_titles = search.get("title_keywords_negative", [])
+    relevant_tech = search.get("relevant_tech", [])
+    core_tech = scoring.get("core_tech", [])
+    signal_list = scoring.get("backend_signals", [])
+    weights = scoring.get("weights", {"title": 35, "tech": 35, "experience": 15, "signal": 15})
+    exp_target = scoring.get("experience_target", "mid")
+    exp_bonuses = scoring.get("experience_bonuses", {})
+
     w_title = int(weights.get("title", 35))
     w_tech = int(weights.get("tech", 35))
     w_exp = int(weights.get("experience", 15))
     w_signal = int(weights.get("signal", 15))
 
-    pos_titles = search.get("title_keywords_positive") or []
-    neg_titles = search.get("title_keywords_negative") or []
-    core_tech_list = scoring.get("core_tech") or []
-    signal_list = scoring.get("backend_signals") or []
-    exp_bonuses = scoring.get("experience_bonuses") or {}
-    exp_target = scoring.get("experience_target", "mid")
-
     score = 0
-    reasons: list[str] = []
-    red_flags: list[str] = []
+    reasons, red_flags = [], []
     full_text = f"{title} {description}".lower()
     title_lower = title.lower()
 
-    # Title relevance
+    # Title
     title_matches = [kw for kw in pos_titles if kw in title_lower]
     if title_matches:
         pts = min(len(title_matches) * 12, w_title)
         score += pts
-        reasons.append(f"Title match: {', '.join(title_matches[:6])}")
+        reasons.append(f"Title: {', '.join(title_matches[:6])}")
 
-    title_negatives = [kw for kw in neg_titles if kw in title_lower]
-    if title_negatives:
-        penalty = len(title_negatives) * 15
-        score -= penalty
-        red_flags.append(f"Title contains: {', '.join(title_negatives[:4])}")
+    title_neg = [kw for kw in neg_titles if kw in title_lower]
+    if title_neg:
+        score -= len(title_neg) * 15
+        red_flags.append(f"Blocked: {', '.join(title_neg[:4])}")
 
-    # Tech stack: split into core / secondary using profile-declared core_tech.
-    # Budget split: ~70% of tech weight for core, ~30% for secondary.
-    tech_found = extract_tech_stack(full_text, profile=profile)
-    core_tech = [t for t in tech_found if t in core_tech_list]
-    secondary_tech = [t for t in tech_found if t not in core_tech]
+    # Tech
+    tech_found = extract_tech_stack(full_text, relevant_tech)
+    tech_core = [t for t in tech_found if t in core_tech]
+    tech_secondary = [t for t in tech_found if t not in core_tech]
 
-    core_budget = max(0, int(round(w_tech * 0.71)))
-    secondary_budget = max(0, w_tech - core_budget)
+    core_budget = max(0, int(w_tech * 0.71))
+    sec_budget = max(0, w_tech - core_budget)
 
-    if core_tech:
-        score += min(len(core_tech) * 12, core_budget)
-        reasons.append(f"Core tech: {', '.join(core_tech)}")
-    if secondary_tech:
-        score += min(len(secondary_tech) * 3, secondary_budget)
-        reasons.append(f"Related tech: {', '.join(secondary_tech[:8])}")
+    if tech_core:
+        score += min(len(tech_core) * 12, core_budget)
+        reasons.append(f"Core tech: {', '.join(tech_core)}")
+    if tech_secondary:
+        score += min(len(tech_secondary) * 3, sec_budget)
+        reasons.append(f"Related: {', '.join(tech_secondary[:8])}")
 
-    # Experience: lookup via experience_bonuses[target][detected], scale by w_exp.
+    # Experience
     exp_level = estimate_experience_level(full_text)
-    row = exp_bonuses.get(exp_target) or {}
-    # Bonus table expresses preference as -15..+15. Scale by (w_exp / 15) so a
-    # profile can dial experience_weight up or down proportionally.
-    raw_bonus = int(row.get(exp_level, 0))
+    exp_row = exp_bonuses.get(exp_target, {})
+    raw_bonus = int(exp_row.get(exp_level, 0))
     scaled_bonus = int(round(raw_bonus * (w_exp / 15.0)))
+    score += scaled_bonus
     if scaled_bonus > 0:
-        score += scaled_bonus
-        reasons.append(f"Experience match: {exp_level} (target={exp_target}) +{scaled_bonus}")
+        reasons.append(f"Exp match: {exp_level} (target={exp_target}) +{scaled_bonus}")
     elif scaled_bonus < 0:
-        score += scaled_bonus
-        red_flags.append(f"Experience mismatch: {exp_level} (target={exp_target}) {scaled_bonus}")
-    else:
-        reasons.append(f"Experience: {exp_level} (target={exp_target})")
+        red_flags.append(f"Exp mismatch: {exp_level} (target={exp_target}) {scaled_bonus}")
 
-    # Domain signals (profile-defined — "backend_signals" key kept for
-    # migration; semantically means "positive domain keywords in description")
-    signal_matches = [s for s in signal_list if s in full_text]
-    if signal_matches:
-        score += min(len(signal_matches) * 4, w_signal)
-        reasons.append(f"Signals: {', '.join(signal_matches[:5])}")
+    # Domain signals
+    sig_matches = [s for s in signal_list if s in full_text]
+    if sig_matches:
+        score += min(len(sig_matches) * 4, w_signal)
+        reasons.append(f"Signals: {', '.join(sig_matches[:5])}")
 
     # India-friendly
-    india_check = check_india_friendly(location, description, profile=profile)
+    india_check = check_india_friendly(
+        location, description,
+        india_positive=location_cfg.get("india_positive", []),
+        india_negative=location_cfg.get("india_negative", []),
+        tz_good=location_cfg.get("timezone_compatible", []),
+        tz_bad=location_cfg.get("timezone_incompatible", []),
+    )
 
     score = max(0, min(100, score))
-
     return {
         "score": score,
         "tech_stack": tech_found,
         "experience_level": exp_level,
-        "reasons": reasons,
-        "red_flags": red_flags,
         "india_friendly": india_check["result"],
         "location_note": india_check["note"],
+        "reasons": reasons,
+        "red_flags": red_flags,
     }

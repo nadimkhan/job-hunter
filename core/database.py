@@ -1,802 +1,697 @@
-import sqlite3
+import aiosqlite, json, sqlite3
+from datetime import datetime, date
 from typing import Optional
-from config.settings import DB_PATH
+from config.settings import DB_PATH, RESUME_DIR
+
+# ─── Init ─────────────────────────────────────────────────────────────────────
+
+INIT_SQL = """
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    company TEXT NOT NULL,
+    location TEXT DEFAULT 'Remote',
+    description TEXT DEFAULT '',
+    url TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    posted_date TEXT,
+    discovered_at TEXT,
+    tech_stack TEXT DEFAULT '',
+    experience_level TEXT DEFAULT 'mid',
+    relevance_score INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'new',
+    company_domain TEXT DEFAULT '',
+    salary TEXT DEFAULT '',
+    job_type TEXT DEFAULT 'full-time',
+    india_friendly TEXT DEFAULT 'unknown',
+    location_note TEXT DEFAULT '',
+    resume_id TEXT,
+    UNIQUE(id)
+);
+
+CREATE TABLE IF NOT EXISTS profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    is_active INTEGER DEFAULT 0,
+    config TEXT DEFAULT '{}',
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS resumes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER DEFAULT 1,
+    role_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    file_size INTEGER DEFAULT 0,
+    uploaded_at TEXT,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS outreach (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    job_title TEXT NOT NULL,
+    company TEXT NOT NULL,
+    company_domain TEXT DEFAULT '',
+    contact_name TEXT DEFAULT '[Search LinkedIn]',
+    contact_position TEXT DEFAULT '',
+    contact_linkedin TEXT DEFAULT '',
+    dm_short TEXT DEFAULT '',
+    dm_long TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    notes TEXT DEFAULT '[]',
+    created_at TEXT,
+    messaged_at TEXT DEFAULT '',
+    replied_at TEXT DEFAULT '',
+    followed_up_at TEXT DEFAULT '',
+    emailed_at TEXT DEFAULT '',
+    profile_id INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS companies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    domain TEXT DEFAULT '',
+    careers_url TEXT DEFAULT '',
+    ats_platform TEXT DEFAULT 'unknown',
+    ats_slug TEXT DEFAULT '',
+    founded_year INTEGER DEFAULT 0,
+    employee_count TEXT DEFAULT '',
+    tags TEXT DEFAULT '',
+    india_friendly TEXT DEFAULT 'unknown',
+    last_crawled TEXT DEFAULT '',
+    crawl_status TEXT DEFAULT 'active',
+    notes TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    date TEXT NOT NULL,
+    daily_count INTEGER DEFAULT 0,
+    monthly_count INTEGER DEFAULT 0,
+    UNIQUE(source, date)
+);
+
+CREATE TABLE IF NOT EXISTS firecrawl_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    created_at TEXT,
+    completed_at TEXT,
+    jobs_found INTEGER DEFAULT 0,
+    error TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS email_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    jobs_count INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'sent',
+    error TEXT DEFAULT '',
+    sent_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS daily_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at TEXT NOT NULL,
+    source TEXT DEFAULT '',
+    fetched INTEGER DEFAULT 0,
+    new INTEGER DEFAULT 0,
+    updated INTEGER DEFAULT 0,
+    filtered_out INTEGER DEFAULT 0,
+    jsearch_used INTEGER DEFAULT 0,
+    error TEXT DEFAULT ''
+);
+"""
+
+DEFAULT_PROFILE_CONFIG = {
+    "search": {
+        "default_terms": [
+            "blockchain developer",
+            "smart contract developer",
+            "web3 developer",
+            "solidity developer",
+            "content creator blockchain",
+        ],
+        "title_keywords_positive": [
+            "blockchain", "web3", "solidity", "smart contract",
+            "content", "video creator", "community manager",
+            "technical writer", "developer relations",
+        ],
+        "title_keywords_negative": [
+            "frontend", "ios", "android", "mobile", "intern",
+            "junior", "senior only", "us only",
+        ],
+        "relevant_tech": [
+            "solidity", "rust", "web3.js", "ethers.js", "hardhat",
+            "foundry", "nft", "defi", "dao", "ethereum", "polygon",
+            "javascript", "python", "react", "node", "ipfs",
+            "chainlink", "openzeppelin", "figma", "motion design",
+            "after effects", "premiere pro", "blender", "ue5",
+        ],
+        "jsearch_default_queries": [
+            {"query": "blockchain developer remote", "country": "us", "date_posted": "3days", "remote_jobs_only": True},
+            {"query": "web3 solidity developer", "country": "us", "date_posted": "3days", "remote_jobs_only": True},
+            {"query": "blockchain content creator", "country": "us", "date_posted": "week", "remote_jobs_only": False},
+        ],
+    },
+    "scoring": {
+        "experience_target": "mid",
+        "min_relevance_score": 50,
+        "min_score_to_store": 20,
+        "weights": {"title": 35, "tech": 35, "experience": 15, "signal": 15},
+        "core_tech": ["solidity", "rust", "web3.js", "ethers.js", "hardhat", "foundry"],
+        "backend_signals": ["defi", "dao", "nft", "smart contract", "gas optimization", "token"],
+    },
+    "location": {
+        "india_positive": ["india", "asia", "worldwide", "global", "anywhere", "remote", "apac"],
+        "india_negative": ["us only", "usa only", "uk only", "eu only", "canada only"],
+        "timezone_compatible": ["ist", "gmt", "utc", "cet", "flexible", "async", "remote"],
+        "timezone_incompatible": ["pst only", "est only", "us timezone required"],
+    },
+    "outreach": {
+        "candidate_name": "Nadim Khan",
+        "candidate_core_tech": ["solidity", "web3.js", "blockchain"],
+        "candidate_extra_tech": ["react", "python", "node"],
+        "linkedin_search_titles": [
+            {"title": "Engineering Manager", "label": "Eng Manager", "category": "engineering"},
+            {"title": "Tech Lead", "label": "Tech Lead", "category": "engineering"},
+            {"title": "Head of Engineering", "label": "Head of Eng", "category": "engineering"},
+            {"title": "CTO", "label": "CTO", "category": "executive"},
+            {"title": "Founder CEO", "label": "CEO / Founder", "category": "executive"},
+            {"title": "Technical Recruiter", "label": "Tech Recruiter", "category": "hr"},
+            {"title": "HR Manager", "label": "HR Manager", "category": "hr"},
+        ],
+        "bio_short": "3+ years in {stack}",
+        "achievements": [
+            "Built blockchain content channel with 10K+ subscribers.",
+            "Deployed Solidity smart contracts on Ethereum mainnet.",
+            "Created developer tooling and technical documentation for DeFi protocols.",
+        ],
+        "dm_short_template": "{greeting}, I noticed {company} is hiring for {title}. I have {bio_short} — built on-chain voting dApps and DeFi dashboards. Would love to connect.",
+        "dm_long_template": "{greeting},\n\nNoticed {company} is hiring for {title}. I've been working in the blockchain space for 3+ years, mostly with Solidity, Web3.js, and Ethereum.\n\n{achievements}\n\nOpen to a 15-min chat?\n\nThanks,\n{candidate_name}",
+        "email_digest_subject_role": "blockchain/web3",
+        "email_greeting": "Your Daily Job Digest",
+        "recipient_email": "",
+    },
+}
 
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(INIT_SQL)
+        await db.commit()
 
-
-def init_db():
-    conn = get_connection()
-
-    # Jobs table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            company TEXT NOT NULL,
-            location TEXT DEFAULT 'Remote',
-            description TEXT DEFAULT '',
-            url TEXT DEFAULT '',
-            source TEXT DEFAULT '',
-            posted_date TEXT,
-            discovered_at TEXT NOT NULL,
-            tech_stack TEXT DEFAULT '',
-            experience_level TEXT DEFAULT '',
-            relevance_score INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'new',
-            company_domain TEXT DEFAULT '',
-            salary TEXT DEFAULT '',
-            job_type TEXT DEFAULT '',
-            india_friendly TEXT DEFAULT 'unknown',
-            location_note TEXT DEFAULT ''
-        )
-    """)
-    # Migration for existing DBs
-    for col, default in [("india_friendly", "'unknown'"), ("location_note", "''"), ("last_seen", "''")]:
-        try:
-            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT DEFAULT {default}")
-        except sqlite3.OperationalError:
-            pass
-    try:
-        conn.execute("ALTER TABLE jobs ADD COLUMN mark_for_email INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE jobs ADD COLUMN scored_profile_id INTEGER DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass
-
-    # Companies table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS companies (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            domain TEXT DEFAULT '',
-            careers_url TEXT DEFAULT '',
-            ats_platform TEXT DEFAULT 'unknown',
-            ats_slug TEXT DEFAULT '',
-            founded_year INTEGER DEFAULT 0,
-            employee_count TEXT DEFAULT '',
-            tags TEXT DEFAULT '',
-            india_friendly TEXT DEFAULT 'unknown',
-            last_crawled TEXT DEFAULT '',
-            crawl_status TEXT DEFAULT 'active',
-            notes TEXT DEFAULT ''
-        )
-    """)
-
-    # Outreach table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS outreach (
-            id TEXT PRIMARY KEY,
-            job_id TEXT NOT NULL,
-            job_title TEXT,
-            company TEXT,
-            company_domain TEXT,
-            contact_name TEXT,
-            contact_position TEXT,
-            contact_linkedin TEXT,
-            dm_short TEXT,
-            dm_long TEXT,
-            status TEXT DEFAULT 'pending',
-            messaged_at TEXT DEFAULT '',
-            replied_at TEXT DEFAULT '',
-            followed_up_at TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            notes TEXT DEFAULT '',
-            emailed_at TEXT DEFAULT ''
-        )
-    """)
-    # Migration
-    try:
-        conn.execute("ALTER TABLE outreach ADD COLUMN emailed_at TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE outreach ADD COLUMN profile_id INTEGER DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass
-
-    # Email log table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS email_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sent_at TEXT NOT NULL,
-            recipient TEXT NOT NULL,
-            subject TEXT,
-            items_count INTEGER DEFAULT 0,
-            outreach_ids TEXT,
-            status TEXT DEFAULT 'sent',
-            error TEXT DEFAULT ''
-        )
-    """)
-
-    # API usage tracking
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS api_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            api_name TEXT NOT NULL,
-            called_at TEXT NOT NULL,
-            success INTEGER DEFAULT 1,
-            notes TEXT DEFAULT ''
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_api_usage_name ON api_usage(api_name, called_at)")
-
-    # Search queries (configurable JSearch queries)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS search_queries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query TEXT NOT NULL,
-            country TEXT DEFAULT 'IN',
-            date_posted TEXT DEFAULT '3days',
-            remote_jobs_only INTEGER DEFAULT 0,
-            enabled INTEGER DEFAULT 1,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    # Seed default queries only if table is empty
-    count = conn.execute("SELECT COUNT(*) FROM search_queries").fetchone()[0]
-    if count == 0:
-        from datetime import datetime as _dt
-        ts = _dt.utcnow().isoformat()
-        defaults = [
-            ("python django backend developer", "IN", "3days", 0),
-            ("python backend engineer", "IN", "3days", 0),
-            ("django developer", "IN", "3days", 0),
-            ("fastapi developer", "IN", "week", 0),
-            ("python backend remote", "IN", "week", 1),
-            ("backend engineer python", "US", "week", 1),
-        ]
-        for q in defaults:
-            conn.execute(
-                "INSERT INTO search_queries (query, country, date_posted, remote_jobs_only, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
-                (*q, ts),
+        # Seed default profile if none exist
+        cursor = await db.execute("SELECT COUNT(*) FROM profiles")
+        count = (await cursor.fetchone())[0]
+        if count == 0:
+            await db.execute(
+                """INSERT INTO profiles (name, description, is_active, config, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    "Blockchain / Web3 Default",
+                    "Default profile for blockchain, web3, and content roles",
+                    1,
+                    json.dumps(DEFAULT_PROFILE_CONFIG),
+                    datetime.utcnow().isoformat(),
+                    datetime.utcnow().isoformat(),
+                )
             )
+            await db.commit()
 
-    # Profiles (per-user search/scoring/outreach config)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS profiles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            description TEXT DEFAULT '',
-            config_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            source TEXT DEFAULT 'custom'
-        )
-    """)
 
-    # Generic app-wide settings (currently holds active_profile_id)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
+def get_sync_db():
+    """For non-async contexts like Flask/file uploads."""
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-    # Indexes
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_relevance ON jobs(relevance_score DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_outreach_status ON outreach(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_outreach_job ON outreach(job_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_outreach_created ON outreach(created_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON jobs(source)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON jobs(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_discovered ON jobs(discovered_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_india ON jobs(india_friendly)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_company_domain ON jobs(company_domain)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_company_ats ON companies(ats_platform)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_company_status ON companies(crawl_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name)")
-    conn.commit()
-    conn.close()
 
-    # First-run seed: if no profiles exist, create "Backend Python (legacy)"
-    # from current settings.py constants and set it active. Idempotent.
+# ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+def insert_job_sync(job_dict: dict) -> str:
+    """Sync version for use in async-to-sync bridge."""
+    conn = get_sync_db()
     try:
-        from core.profile import ensure_first_run_seed
-        ensure_first_run_seed()
+        conn.execute("""
+            INSERT OR REPLACE INTO jobs
+            (id, title, company, location, description, url, source, posted_date,
+             discovered_at, tech_stack, experience_level, relevance_score, status,
+             company_domain, salary, job_type, india_friendly, location_note, resume_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_dict.get("id"), job_dict.get("title"), job_dict.get("company"),
+            job_dict.get("location"), job_dict.get("description"), job_dict.get("url"),
+            job_dict.get("source"), job_dict.get("posted_date"),
+            job_dict.get("discovered_at"), job_dict.get("tech_stack"),
+            job_dict.get("experience_level"), job_dict.get("relevance_score"),
+            job_dict.get("status"), job_dict.get("company_domain"),
+            job_dict.get("salary"), job_dict.get("job_type"),
+            job_dict.get("india_friendly"), job_dict.get("location_note"),
+            job_dict.get("resume_id"),
+        ))
+        conn.commit()
+        return "inserted"
     except Exception as e:
-        # Don't block server startup on a seed failure — log and continue.
-        print(f"[init_db] profile seed skipped: {e}", flush=True)
-
-
-# ── Jobs CRUD ──────────────────────────────────────────────────
-
-def insert_job(job_dict: dict) -> str:
-    """Upsert a job.
-    Returns 'new' if new, 'updated' if existed (last_seen refreshed).
-    """
-    from datetime import datetime
-    conn = get_connection()
-    now = datetime.utcnow().isoformat()
-    job_dict["last_seen"] = now
-
-    try:
-        existing = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_dict["id"],)).fetchone()
-        if existing:
-            # Update last_seen + refreshed timestamp; keep status/notes intact
-            conn.execute("UPDATE jobs SET last_seen = ? WHERE id = ?", (now, job_dict["id"]))
+        if "UNIQUE" in str(e):
+            conn.execute("""
+                UPDATE jobs SET relevance_score=?, status='new', discovered_at=?,
+                tech_stack=?, india_friendly=?, location_note=?, experience_level=?,
+                resume_id=?
+                WHERE id=?
+            """, (
+                job_dict.get("relevance_score"), job_dict.get("discovered_at"),
+                job_dict.get("tech_stack"), job_dict.get("india_friendly"),
+                job_dict.get("location_note"), job_dict.get("experience_level"),
+                job_dict.get("resume_id"), job_dict.get("id"),
+            ))
             conn.commit()
             return "updated"
-        job_dict.setdefault("scored_profile_id", None)
-        conn.execute("""
-            INSERT INTO jobs (id, title, company, location, description, url,
-                            source, posted_date, discovered_at, tech_stack,
-                            experience_level, relevance_score, status,
-                            company_domain, salary, job_type,
-                            india_friendly, location_note, last_seen,
-                            scored_profile_id)
-            VALUES (:id, :title, :company, :location, :description, :url,
-                    :source, :posted_date, :discovered_at, :tech_stack,
-                    :experience_level, :relevance_score, :status,
-                    :company_domain, :salary, :job_type,
-                    :india_friendly, :location_note, :last_seen,
-                    :scored_profile_id)
-        """, job_dict)
-        conn.commit()
-        return "new"
-    except sqlite3.IntegrityError:
-        return "updated"
+        return "error"
     finally:
         conn.close()
 
 
-def cleanup_old_jobs(days: int = 14) -> int:
-    """Delete jobs not seen in N days. Returns number deleted."""
-    from datetime import datetime, timedelta
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    conn = get_connection()
-    # Don't delete jobs user has marked applied or for_email
-    cur = conn.execute(
-        """DELETE FROM jobs
-           WHERE (last_seen < ? OR last_seen = '' OR last_seen IS NULL)
-             AND status IN ('new', 'reviewed', 'stale')
-             AND (mark_for_email = 0 OR mark_for_email IS NULL)""",
-        (cutoff,),
-    )
-    count = cur.rowcount
-    conn.commit()
-    conn.close()
-    return count
+async def insert_job(db, job_dict: dict) -> str:
+    """Async version for use inside async contexts."""
+    try:
+        await db.execute("""
+            INSERT OR REPLACE INTO jobs
+            (id, title, company, location, description, url, source, posted_date,
+             discovered_at, tech_stack, experience_level, relevance_score, status,
+             company_domain, salary, job_type, india_friendly, location_note, resume_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_dict.get("id"), job_dict.get("title"), job_dict.get("company"),
+            job_dict.get("location"), job_dict.get("description"), job_dict.get("url"),
+            job_dict.get("source"), job_dict.get("posted_date"),
+            job_dict.get("discovered_at"), job_dict.get("tech_stack"),
+            job_dict.get("experience_level"), job_dict.get("relevance_score"),
+            job_dict.get("status"), job_dict.get("company_domain"),
+            job_dict.get("salary"), job_dict.get("job_type"),
+            job_dict.get("india_friendly"), job_dict.get("location_note"),
+            job_dict.get("resume_id"),
+        ))
+        return "inserted"
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            return "updated"
+        return f"error: {e}"
 
 
-def toggle_mark_for_email(job_id: str) -> bool:
-    """Toggle mark_for_email flag. Returns new state."""
-    conn = get_connection()
-    row = conn.execute("SELECT mark_for_email FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    new_state = 0 if (row and row[0]) else 1
-    conn.execute("UPDATE jobs SET mark_for_email = ? WHERE id = ?", (new_state, job_id))
-    conn.commit()
-    conn.close()
-    return bool(new_state)
+async def get_jobs(db, source=None, status=None, min_score=0,
+                   search=None, location=None, tech=None,
+                   india_friendly=None, company_domain=None,
+                   limit=50, offset=0, seen_after=None):
+    where, params = [], []
+    if source:       where.append("source LIKE ?");       params.append(f"%{source}%")
+    if status:       where.append("status=?");            params.append(status)
+    if min_score:    where.append("relevance_score>=?");  params.append(min_score)
+    if search:       where.append("(title LIKE ? OR company LIKE ? OR description LIKE ?)"); params.extend([f"%{search}%"]*3)
+    if location:     where.append("location LIKE ?");     params.append(f"%{location}%")
+    if tech:         where.append("tech_stack LIKE ?");    params.append(f"%{tech}%")
+    if india_friendly: where.append("india_friendly=?");   params.append(india_friendly)
+    if company_domain: where.append("company_domain=?");   params.append(company_domain)
+    if seen_after:   where.append("discovered_at>=?");    params.append(seen_after)
 
-
-def get_marked_jobs(limit: int = 50) -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM jobs WHERE mark_for_email = 1 ORDER BY relevance_score DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_jobs(
-    source: Optional[str] = None,
-    status: Optional[str] = None,
-    min_score: int = 0,
-    search: Optional[str] = None,
-    location: Optional[str] = None,
-    tech: Optional[str] = None,
-    india_friendly: Optional[str] = None,
-    company_domain: Optional[str] = None,
-    seen_after: Optional[str] = None,     # ISO timestamp; only jobs refreshed at/after this
-    limit: int = 100,
-    offset: int = 0,
-) -> list[dict]:
-    conn = get_connection()
-    query = "SELECT * FROM jobs WHERE relevance_score >= ?"
-    params: list = [min_score]
-
-    if source:
-        query += " AND source LIKE ?"
-        params.append(f"%{source}%")
-    if status:
-        query += " AND status = ?"
-        params.append(status)
-    if search:
-        query += " AND (title LIKE ? OR company LIKE ? OR description LIKE ?)"
-        s = f"%{search}%"
-        params.extend([s, s, s])
-    if location:
-        query += " AND location LIKE ?"
-        params.append(f"%{location}%")
-    if tech:
-        query += " AND tech_stack LIKE ?"
-        params.append(f"%{tech}%")
-    if india_friendly:
-        if india_friendly == "yes":
-            query += " AND india_friendly = 'yes'"
-        elif india_friendly == "no":
-            query += " AND india_friendly = 'no'"
-        elif india_friendly == "maybe":
-            query += " AND india_friendly IN ('yes', 'maybe')"
-    if company_domain:
-        query += " AND company_domain = ?"
-        params.append(company_domain)
-    if seen_after:
-        query += " AND last_seen >= ?"
-        params.append(seen_after)
-
-    query += " ORDER BY relevance_score DESC, discovered_at DESC LIMIT ? OFFSET ?"
+    sql = "SELECT * FROM jobs"
+    if where: sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY relevance_score DESC, discovered_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    cursor = await db.execute(sql, params)
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
 
 
-def get_job_by_id(job_id: str) -> Optional[dict]:
-    conn = get_connection()
-    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def update_job_status(job_id: str, status: str):
-    conn = get_connection()
-    conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
-    conn.commit()
-    conn.close()
-
-
-def get_stats() -> dict:
-    conn = get_connection()
-    total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    by_source = conn.execute(
-        "SELECT source, COUNT(*) as count FROM jobs GROUP BY source"
-    ).fetchall()
-    by_status = conn.execute(
-        "SELECT status, COUNT(*) as count FROM jobs GROUP BY status"
-    ).fetchall()
-    by_india = conn.execute(
-        "SELECT india_friendly, COUNT(*) as count FROM jobs GROUP BY india_friendly"
-    ).fetchall()
-    avg_score = conn.execute(
-        "SELECT AVG(relevance_score) FROM jobs WHERE relevance_score > 0"
-    ).fetchone()[0]
-    conn.close()
-    return {
-        "total": total,
-        "by_source": {row["source"]: row["count"] for row in by_source},
-        "by_status": {row["status"]: row["count"] for row in by_status},
-        "by_india": {row["india_friendly"]: row["count"] for row in by_india},
-        "avg_score": round(avg_score, 1) if avg_score else 0,
-    }
-
-
-def get_sources() -> list[str]:
-    conn = get_connection()
-    rows = conn.execute("SELECT DISTINCT source FROM jobs ORDER BY source").fetchall()
-    conn.close()
-    return [row["source"] for row in rows]
-
-
-# ── Companies CRUD ─────────────────────────────────────────────
-
-def upsert_company(company_dict: dict) -> bool:
-    conn = get_connection()
-    try:
-        conn.execute("""
-            INSERT OR REPLACE INTO companies
-                (id, name, domain, careers_url, ats_platform, ats_slug,
-                 founded_year, employee_count, tags, india_friendly,
-                 last_crawled, crawl_status, notes)
-            VALUES (:id, :name, :domain, :careers_url, :ats_platform, :ats_slug,
-                    :founded_year, :employee_count, :tags, :india_friendly,
-                    :last_crawled, :crawl_status, :notes)
-        """, company_dict)
-        conn.commit()
-        return True
-    except Exception:
-        return False
-    finally:
-        conn.close()
-
-
-def get_companies(
-    ats_platform: Optional[str] = None,
-    crawl_status: Optional[str] = None,
-    india_friendly: Optional[str] = None,
-    search: Optional[str] = None,
-    limit: int = 200,
-    offset: int = 0,
-) -> list[dict]:
-    conn = get_connection()
-    query = "SELECT * FROM companies WHERE 1=1"
-    params: list = []
-
-    if ats_platform:
-        query += " AND ats_platform = ?"
-        params.append(ats_platform)
-    if crawl_status:
-        query += " AND crawl_status = ?"
-        params.append(crawl_status)
-    if india_friendly:
-        query += " AND india_friendly = ?"
-        params.append(india_friendly)
-    if search:
-        query += " AND (name LIKE ? OR domain LIKE ? OR tags LIKE ?)"
-        s = f"%{search}%"
-        params.extend([s, s, s])
-
-    query += " ORDER BY name ASC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-
-def get_company_by_id(company_id: str) -> Optional[dict]:
-    conn = get_connection()
-    row = conn.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def update_company_crawl_status(company_id: str, status: str, last_crawled: str = ""):
-    conn = get_connection()
-    if last_crawled:
-        conn.execute(
-            "UPDATE companies SET crawl_status = ?, last_crawled = ? WHERE id = ?",
-            (status, last_crawled, company_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE companies SET crawl_status = ? WHERE id = ?",
-            (status, company_id),
-        )
-    conn.commit()
-    conn.close()
-
-
-# ── Outreach CRUD ──────────────────────────────────────────────
-
-def insert_outreach(item: dict) -> bool:
-    conn = get_connection()
-    try:
-        item.setdefault("profile_id", None)
-        conn.execute("""
-            INSERT OR REPLACE INTO outreach
-                (id, job_id, job_title, company, company_domain,
-                 contact_name, contact_position, contact_linkedin,
-                 dm_short, dm_long, status, messaged_at, replied_at,
-                 followed_up_at, created_at, notes, profile_id)
-            VALUES (:id, :job_id, :job_title, :company, :company_domain,
-                    :contact_name, :contact_position, :contact_linkedin,
-                    :dm_short, :dm_long, :status, :messaged_at, :replied_at,
-                    :followed_up_at, :created_at, :notes, :profile_id)
-        """, item)
-        conn.commit()
-        return True
-    except Exception:
-        return False
-    finally:
-        conn.close()
-
-
-def get_outreach(
-    status: Optional[str] = None,
-    search: Optional[str] = None,
-    batch: Optional[str] = None,   # "new" | "old" | None
-    limit: int = 100,
-    offset: int = 0,
-) -> list[dict]:
-    conn = get_connection()
-    query = """
-        SELECT o.*, j.url as job_url, j.relevance_score, j.tech_stack,
-               j.location, j.salary, j.india_friendly
-        FROM outreach o
-        LEFT JOIN jobs j ON j.id = o.job_id
-        WHERE 1=1
-    """
-    params: list = []
-    if status:
-        query += " AND o.status = ?"
-        params.append(status)
-    if search:
-        query += " AND (o.company LIKE ? OR o.job_title LIKE ? OR o.contact_name LIKE ?)"
-        s = f"%{search}%"
-        params.extend([s, s, s])
-    if batch in ("new", "old"):
-        batch_at = get_last_outreach_batch_at()
-        if batch_at:
-            op = ">=" if batch == "new" else "<"
-            query += f" AND o.created_at {op} ?"
-            params.append(batch_at)
-        elif batch == "new":
-            # No recorded batch yet — treat the most recent generation as "new"
-            # by returning nothing until a generation actually runs.
-            query += " AND 0"
-    query += " ORDER BY o.created_at DESC, j.relevance_score DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def delete_outreach_bulk(ids: list[str]) -> int:
-    if not ids:
-        return 0
-    conn = get_connection()
-    try:
-        placeholders = ",".join(["?"] * len(ids))
-        cur = conn.execute(
-            f"DELETE FROM outreach WHERE id IN ({placeholders})", ids,
-        )
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
-
-
-def delete_all_outreach() -> int:
-    conn = get_connection()
-    try:
-        cur = conn.execute("DELETE FROM outreach")
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
-
-
-def set_last_outreach_batch_at(ts: str) -> None:
-    conn = get_connection()
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value, updated_at) "
-            "VALUES ('last_outreach_batch_at', ?, ?)",
-            (ts, ts),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def get_last_outreach_batch_at() -> Optional[str]:
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = 'last_outreach_batch_at'"
-        ).fetchone()
-    except sqlite3.OperationalError:
+async def get_job_by_id(db, job_id: str):
+    cursor = await db.execute("SELECT * FROM jobs WHERE id=?", (job_id,))
+    row = await cursor.fetchone()
+    if not row:
         return None
-    finally:
-        conn.close()
-    return row["value"] if row else None
+    cols = [d[0] for d in cursor.description]
+    return dict(zip(cols, row))
 
 
-def update_outreach_status(outreach_id: str, status: str, field: str = None):
-    from datetime import datetime
-    conn = get_connection()
-    ts = datetime.utcnow().isoformat()
-    if field == "messaged":
-        conn.execute("UPDATE outreach SET status=?, messaged_at=? WHERE id=?", (status, ts, outreach_id))
-    elif field == "replied":
-        conn.execute("UPDATE outreach SET status=?, replied_at=? WHERE id=?", (status, ts, outreach_id))
-    elif field == "followed_up":
-        conn.execute("UPDATE outreach SET status=?, followed_up_at=? WHERE id=?", (status, ts, outreach_id))
-    else:
-        conn.execute("UPDATE outreach SET status=? WHERE id=?", (status, outreach_id))
-    conn.commit()
-    conn.close()
+async def update_job_status(db, job_id: str, status: str):
+    await db.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
+    await db.commit()
 
 
-def update_outreach_notes(outreach_id: str, notes: str):
-    conn = get_connection()
-    conn.execute("UPDATE outreach SET notes = ? WHERE id = ?", (notes, outreach_id))
-    conn.commit()
-    conn.close()
+async def get_stats(db):
+    cursor = await db.execute("""
+        SELECT status, COUNT(*) as count FROM jobs GROUP BY status
+    """)
+    rows = await cursor.fetchall()
+    status_counts = dict(rows)
+    total = sum(status_counts.values())
 
+    cursor2 = await db.execute("SELECT COUNT(*) FROM jobs WHERE status='new'")
+    new_count = (await cursor2.fetchone())[0]
 
-def outreach_exists_for_job(job_id: str) -> bool:
-    conn = get_connection()
-    row = conn.execute("SELECT id FROM outreach WHERE job_id = ? LIMIT 1", (job_id,)).fetchone()
-    conn.close()
-    return row is not None
+    cursor3 = await db.execute("""
+        SELECT date(discovered_at) as d, COUNT(*) FROM jobs
+        WHERE discovered_at >= date('now', '-7 days')
+        GROUP BY d ORDER BY d DESC
+    """)
+    week_rows = await cursor3.fetchall()
 
-
-def get_outreach_stats() -> dict:
-    conn = get_connection()
-    total = conn.execute("SELECT COUNT(*) FROM outreach").fetchone()[0]
-    by_status = conn.execute(
-        "SELECT status, COUNT(*) as count FROM outreach GROUP BY status"
-    ).fetchall()
-    conn.close()
     return {
         "total": total,
-        "by_status": {r["status"]: r["count"] for r in by_status},
+        "new": new_count,
+        "by_status": status_counts,
+        "last_7_days": [{"date": r[0], "count": r[1]} for r in week_rows],
     }
 
 
-def get_unemailed_outreach(limit: int = 15, only_marked: bool = False) -> list[dict]:
-    """Get outreach items that haven't been emailed yet.
-    If only_marked=True, only returns items for jobs marked for email.
-    Otherwise prefers marked jobs but falls back to highest score."""
-    conn = get_connection()
-    where = "(o.emailed_at = '' OR o.emailed_at IS NULL) AND o.status = 'pending'"
-    if only_marked:
-        where += " AND j.mark_for_email = 1"
+# ─── Profiles ─────────────────────────────────────────────────────────────────
 
-    rows = conn.execute(f"""
-        SELECT o.*, j.relevance_score, j.url AS job_url, j.description AS job_description,
-               j.tech_stack, j.salary, j.location, j.posted_date, j.india_friendly,
-               j.mark_for_email
-        FROM outreach o
-        LEFT JOIN jobs j ON j.id = o.job_id
-        WHERE {where}
-        ORDER BY j.mark_for_email DESC, j.relevance_score DESC, o.created_at DESC
-        LIMIT ?
-    """, (limit,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+async def get_profiles(db):
+    cursor = await db.execute("SELECT * FROM profiles ORDER BY is_active DESC, name ASC")
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    result = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        if isinstance(d.get("config"), str):
+            d["config"] = json.loads(d["config"])
+        result.append(d)
+    return result
 
 
-def mark_outreach_emailed(outreach_ids: list[str]):
-    """Flip sent items from pending → emailed so they drop out of the
-    'ready to send' queue. Items already in messaged/replied/followed_up
-    keep their current status (we only update ones still 'pending')."""
-    from datetime import datetime
-    conn = get_connection()
-    ts = datetime.utcnow().isoformat()
-    for oid in outreach_ids:
-        conn.execute(
-            "UPDATE outreach SET emailed_at = ?, "
-            "status = CASE WHEN status = 'pending' THEN 'emailed' ELSE status END "
-            "WHERE id = ?",
-            (ts, oid),
-        )
-    conn.commit()
-    conn.close()
+async def get_active_profile(db):
+    cursor = await db.execute("SELECT * FROM profiles WHERE is_active=1 LIMIT 1")
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    cols = [d[0] for d in cursor.description]
+    d = dict(zip(cols, row))
+    if isinstance(d.get("config"), str):
+        d["config"] = json.loads(d["config"])
+    return d
 
 
-def log_email(recipient: str, subject: str, items_count: int,
-              outreach_ids: list[str], status: str = "sent", error: str = ""):
-    from datetime import datetime
-    conn = get_connection()
-    conn.execute("""
-        INSERT INTO email_log (sent_at, recipient, subject, items_count, outreach_ids, status, error)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (datetime.utcnow().isoformat(), recipient, subject, items_count,
-          ",".join(outreach_ids), status, error))
-    conn.commit()
-    conn.close()
-
-
-def get_search_queries(enabled_only: bool = False) -> list[dict]:
-    conn = get_connection()
-    if enabled_only:
-        rows = conn.execute("SELECT * FROM search_queries WHERE enabled = 1 ORDER BY id").fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM search_queries ORDER BY id").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def add_search_query(query: str, country: str = "IN", date_posted: str = "3days",
-                      remote_jobs_only: bool = False) -> int:
-    from datetime import datetime
-    conn = get_connection()
-    cur = conn.execute(
-        "INSERT INTO search_queries (query, country, date_posted, remote_jobs_only, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
-        (query, country, date_posted, 1 if remote_jobs_only else 0, datetime.utcnow().isoformat()),
+async def create_profile(db, name: str, description: str, config: dict):
+    cursor = await db.execute(
+        """INSERT INTO profiles (name, description, is_active, config, created_at, updated_at)
+           VALUES (?, ?, 0, ?, ?, ?)""",
+        (name, description, json.dumps(config), datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
     )
-    qid = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return qid
+    await db.commit()
+    return cursor.lastrowid
 
 
-def update_search_query(qid: int, query: str = None, country: str = None,
-                         date_posted: str = None, remote_jobs_only: bool = None,
-                         enabled: bool = None):
-    conn = get_connection()
-    updates = []
+async def update_profile(db, profile_id: int, name: str, description: str, config: dict):
+    await db.execute(
+        """UPDATE profiles SET name=?, description=?, config=?, updated_at=? WHERE id=?""",
+        (name, description, json.dumps(config), datetime.utcnow().isoformat(), profile_id)
+    )
+    await db.commit()
+
+
+async def set_active_profile(db, profile_id: int):
+    await db.execute("UPDATE profiles SET is_active=0")
+    await db.execute("UPDATE profiles SET is_active=1 WHERE id=?", (profile_id,))
+    await db.commit()
+
+
+async def delete_profile(db, profile_id: int):
+    await db.execute("DELETE FROM profiles WHERE id=? AND is_active=0", (profile_id,))
+    await db.commit()
+
+
+# ─── Resumes ──────────────────────────────────────────────────────────────────
+
+async def get_resumes(db, profile_id: int = None):
+    sql = "SELECT * FROM resumes"
     params = []
-    if query is not None:
-        updates.append("query = ?"); params.append(query)
-    if country is not None:
-        updates.append("country = ?"); params.append(country)
-    if date_posted is not None:
-        updates.append("date_posted = ?"); params.append(date_posted)
-    if remote_jobs_only is not None:
-        updates.append("remote_jobs_only = ?"); params.append(1 if remote_jobs_only else 0)
-    if enabled is not None:
-        updates.append("enabled = ?"); params.append(1 if enabled else 0)
-    if updates:
-        params.append(qid)
-        conn.execute(f"UPDATE search_queries SET {', '.join(updates)} WHERE id = ?", params)
-        conn.commit()
-    conn.close()
+    if profile_id:
+        sql += " WHERE profile_id=?"
+        params.append(profile_id)
+    sql += " ORDER BY uploaded_at DESC"
+    cursor = await db.execute(sql, params)
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
 
 
-def delete_search_query(qid: int):
-    conn = get_connection()
-    conn.execute("DELETE FROM search_queries WHERE id = ?", (qid,))
-    conn.commit()
-    conn.close()
-
-
-def log_api_call(api_name: str, success: bool = True, notes: str = ""):
-    from datetime import datetime
-    conn = get_connection()
-    conn.execute(
-        "INSERT INTO api_usage (api_name, called_at, success, notes) VALUES (?, ?, ?, ?)",
-        (api_name, datetime.utcnow().isoformat(), 1 if success else 0, notes),
+async def insert_resume(db, profile_id: int, role_name: str, file_path: str,
+                        original_filename: str, file_size: int):
+    # Delete existing resume for same role
+    await db.execute("DELETE FROM resumes WHERE profile_id=? AND role_name=?",
+                     (profile_id, role_name))
+    cursor = await db.execute(
+        """INSERT INTO resumes (profile_id, role_name, file_path, original_filename, file_size, uploaded_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (profile_id, role_name, file_path, original_filename, file_size, datetime.utcnow().isoformat())
     )
-    conn.commit()
-    conn.close()
+    await db.commit()
+    return cursor.lastrowid
 
 
-def get_api_usage(api_name: str) -> dict:
-    """Returns usage stats for a given API — monthly count."""
-    from datetime import datetime
-    conn = get_connection()
-    # Month start ISO string
-    now = datetime.utcnow()
-    month_start = datetime(now.year, now.month, 1).isoformat()
-    month = conn.execute(
-        "SELECT COUNT(*) FROM api_usage WHERE api_name=? AND called_at >= ?",
-        (api_name, month_start),
-    ).fetchone()[0]
-    # Today
-    today_start = datetime(now.year, now.month, now.day).isoformat()
-    today = conn.execute(
-        "SELECT COUNT(*) FROM api_usage WHERE api_name=? AND called_at >= ?",
-        (api_name, today_start),
-    ).fetchone()[0]
-    total = conn.execute(
-        "SELECT COUNT(*) FROM api_usage WHERE api_name=?", (api_name,),
-    ).fetchone()[0]
-    conn.close()
-    return {"month": month, "today": today, "total": total}
+async def delete_resume(db, resume_id: int):
+    if resume_id is None:
+        return
+    await db.execute("DELETE FROM resumes WHERE id=?", (resume_id,))
+    await db.commit()
 
 
-def get_email_logs(limit: int = 30) -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM email_log ORDER BY sent_at DESC LIMIT ?", (limit,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+# ─── Outreach ─────────────────────────────────────────────────────────────────
+
+async def get_outreach(db, status=None, search=None, limit=100, offset=0):
+    where, params = [], []
+    if status:    where.append("status=?");           params.append(status)
+    if search:    where.append("(company LIKE ? OR job_title LIKE ?)"); params.extend([f"%{search}%"]*2)
+    sql = "SELECT * FROM outreach"
+    if where: sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    cursor = await db.execute(sql, params)
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
 
 
-def get_company_stats() -> dict:
-    conn = get_connection()
-    total = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-    by_platform = conn.execute(
-        "SELECT ats_platform, COUNT(*) as count FROM companies GROUP BY ats_platform"
-    ).fetchall()
-    by_status = conn.execute(
-        "SELECT crawl_status, COUNT(*) as count FROM companies GROUP BY crawl_status"
-    ).fetchall()
-    by_india = conn.execute(
-        "SELECT india_friendly, COUNT(*) as count FROM companies GROUP BY india_friendly"
-    ).fetchall()
-    conn.close()
-    return {
-        "total": total,
-        "by_platform": {row["ats_platform"]: row["count"] for row in by_platform},
-        "by_status": {row["crawl_status"]: row["count"] for row in by_status},
-        "by_india": {row["india_friendly"]: row["count"] for row in by_india},
-    }
+async def insert_outreach(db, item: dict):
+    await db.execute(
+        """INSERT OR IGNORE INTO outreach
+           (job_id, job_title, company, company_domain, contact_name, contact_position,
+            contact_linkedin, dm_short, dm_long, status, notes, created_at, profile_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            item.get("job_id"), item.get("job_title"), item.get("company"),
+            item.get("company_domain"), item.get("contact_name", "[Search LinkedIn]"),
+            item.get("contact_position", ""), item.get("contact_linkedin", ""),
+            item.get("dm_short", ""), item.get("dm_long", ""),
+            item.get("status", "pending"), item.get("notes", "[]"),
+            item.get("created_at", datetime.utcnow().isoformat()),
+            item.get("profile_id", 0),
+        )
+    )
+    await db.commit()
+
+
+async def update_outreach_status(db, outreach_id: int, status: str):
+    now = datetime.utcnow().isoformat()
+    field_map = {"messaged": "messaged_at", "replied": "replied_at", "followed_up": "followed_up_at"}
+    field = field_map.get(status, "")
+    if field:
+        await db.execute(f"UPDATE outreach SET status=?, {field}=? WHERE id=?",
+                         (status, now, outreach_id))
+    else:
+        await db.execute("UPDATE outreach SET status=? WHERE id=?", (status, outreach_id))
+    await db.commit()
+
+
+async def outreach_exists_for_job(db, job_id: str) -> bool:
+    cursor = await db.execute("SELECT COUNT(*) FROM outreach WHERE job_id=?", (job_id,))
+    count = (await cursor.fetchone())[0]
+    return count > 0
+
+
+async def get_unemailed_outreach(db, limit=15):
+    cursor = await db.execute(
+        """SELECT o.*, j.title as job_title, j.url as job_url, j.relevance_score,
+                  j.company_domain, j.location, j.salary, j.tech_stack
+           FROM outreach o
+           JOIN jobs j ON o.job_id = j.id
+           WHERE o.emailed_at = '' OR o.emailed_at IS NULL
+           ORDER BY j.relevance_score DESC
+           LIMIT ?""", (limit,)
+    )
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+async def mark_outreach_emailed(db, outreach_ids: list):
+    now = datetime.utcnow().isoformat()
+    for oid in outreach_ids:
+        await db.execute("UPDATE outreach SET emailed_at=? WHERE id=?", (now, oid))
+    await db.commit()
+
+
+# ─── Companies ────────────────────────────────────────────────────────────────
+
+async def get_companies(db, ats_platform=None, crawl_status=None, search=None,
+                        limit=200, offset=0):
+    where, params = [], []
+    if ats_platform:   where.append("ats_platform=?");      params.append(ats_platform)
+    if crawl_status:   where.append("crawl_status=?");      params.append(crawl_status)
+    if search:         where.append("name LIKE ?");         params.append(f"%{search}%")
+    sql = "SELECT * FROM companies"
+    if where: sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY name ASC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    cursor = await db.execute(sql, params)
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+async def upsert_company(db, company: dict):
+    await db.execute(
+        """INSERT OR REPLACE INTO companies
+           (name, domain, careers_url, ats_platform, ats_slug, founded_year,
+            employee_count, tags, india_friendly, last_crawled, crawl_status, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            company["name"], company.get("domain", ""), company.get("careers_url", ""),
+            company.get("ats_platform", "unknown"), company.get("ats_slug", ""),
+            company.get("founded_year", 0), company.get("employee_count", ""),
+            company.get("tags", ""), company.get("india_friendly", "unknown"),
+            company.get("last_crawled", ""), company.get("crawl_status", "active"),
+            company.get("notes", ""),
+        )
+    )
+    await db.commit()
+
+
+# ─── API Usage ────────────────────────────────────────────────────────────────
+
+async def get_api_usage(db, source: str = "jsearch"):
+    today = date.today().isoformat()
+    month_start = date.today().replace(day=1).isoformat()
+    cursor = await db.execute(
+        "SELECT daily_count, monthly_count FROM api_usage WHERE source=? AND date=?",
+        (source, today)
+    )
+    row = await cursor.fetchone()
+    if row:
+        return {"daily": row[0], "monthly": row[1], "date": today}
+    # Check monthly from month start
+    cursor2 = await db.execute(
+        "SELECT SUM(daily_count) FROM api_usage WHERE source=? AND date>=?",
+        (source, month_start)
+    )
+    monthly_total = (await cursor2.fetchone())[0] or 0
+    return {"daily": 0, "monthly": monthly_total, "date": today}
+
+
+async def increment_api_usage(db, source: str = "jsearch", count: int = 1):
+    today = date.today().isoformat()
+    month_start = date.today().replace(day=1).isoformat()
+    cursor = await db.execute(
+        "SELECT daily_count, monthly_count FROM api_usage WHERE source=? AND date=?",
+        (source, today)
+    )
+    row = await cursor.fetchone()
+    if row:
+        new_daily = row[0] + count
+        new_monthly = row[1] + count
+        await db.execute(
+            "UPDATE api_usage SET daily_count=?, monthly_count=? WHERE source=? AND date=?",
+            (new_daily, new_monthly, source, today)
+        )
+    else:
+        # Calculate monthly
+        cursor2 = await db.execute(
+            "SELECT SUM(daily_count) FROM api_usage WHERE source=? AND date>=?",
+            (source, month_start)
+        )
+        monthly_so_far = (await cursor2.fetchone())[0] or 0
+        await db.execute(
+            "INSERT INTO api_usage (source, date, daily_count, monthly_count) VALUES (?, ?, ?, ?)",
+            (source, today, count, monthly_so_far + count)
+        )
+    await db.commit()
+
+
+# ─── Firecrawl Queue ─────────────────────────────────────────────────────────
+
+async def add_firecrawl_url(db, company_name: str, url: str):
+    await db.execute(
+        "INSERT INTO firecrawl_queue (company_name, url, status, created_at) VALUES (?, ?, 'pending', ?)",
+        (company_name, url, datetime.utcnow().isoformat())
+    )
+    await db.commit()
+
+
+async def get_pending_firecrawl(db, limit=20):
+    cursor = await db.execute(
+        "SELECT * FROM firecrawl_queue WHERE status='pending' ORDER BY created_at ASC LIMIT ?",
+        (limit,)
+    )
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+async def complete_firecrawl(db, queue_id: int, jobs_found: int, error: str = ""):
+    await db.execute(
+        "UPDATE firecrawl_queue SET status=?, completed_at=?, jobs_found=?, error=? WHERE id=?",
+        ("completed" if not error else "failed", datetime.utcnow().isoformat(),
+         jobs_found, error, queue_id)
+    )
+    await db.commit()
+
+
+# ─── Email Logs ───────────────────────────────────────────────────────────────
+
+async def log_email(db, recipient: str, subject: str, jobs_count: int,
+                    status: str = "sent", error: str = ""):
+    await db.execute(
+        """INSERT INTO email_logs (recipient, subject, jobs_count, status, error, sent_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (recipient, subject, jobs_count, status, error, datetime.utcnow().isoformat())
+    )
+    await db.commit()
+
+
+async def get_email_logs(db, limit=10):
+    cursor = await db.execute(
+        "SELECT * FROM email_logs ORDER BY sent_at DESC LIMIT ?", (limit,)
+    )
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+# ─── Daily Runs ───────────────────────────────────────────────────────────────
+
+async def log_daily_run(db, source: str, fetched: int, new: int,
+                         updated: int, filtered_out: int,
+                         jsearch_used: int = 0, error: str = ""):
+    await db.execute(
+        """INSERT INTO daily_runs (run_at, source, fetched, new, updated,
+                                   filtered_out, jsearch_used, error)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (datetime.utcnow().isoformat(), source, fetched, new, updated,
+         filtered_out, jsearch_used, error)
+    )
+    await db.commit()
+
+
+async def get_last_runs(db, limit=5):
+    cursor = await db.execute(
+        "SELECT * FROM daily_runs ORDER BY run_at DESC LIMIT ?", (limit,)
+    )
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]

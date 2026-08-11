@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Companies — Job Hunter</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard">Dashboard</a>
+  <a href="/web/jobs">Jobs</a>
+  <a href="/web/profiles">Profiles</a>
+  <a href="/web/resumes">Resumes</a>
+  <a href="/web/companies" class="active">Companies</a>
+  <a href="/web/outreach">Outreach</a>
+</nav>
+
+<main class="container">
+  <div class="page-header">
+    <h1>Companies</h1>
+    <form class="filter-bar" method="get" action="/web/companies">
+      <input type="text" name="search" placeholder="Search company..." value="{{ search }}">
+      <button type="submit" class="btn btn-small">Search</button>
+    </form>
+  </div>
+
+  <!-- Add company -->
+  <div class="card">
+    <h2>Add Company</h2>
+    <form method="post" action="/web/companies/add">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Company Name *</label>
+          <input type="text" name="name" required placeholder="e.g. OpenZeppelin">
+        </div>
+        <div class="form-group">
+          <label>Domain</label>
+          <input type="text" name="domain" placeholder="e.g. openzeppelin.com">
+        </div>
+        <div class="form-group">
+          <label>Careers URL</label>
+          <input type="url" name="careers_url" placeholder="https://openzeppelin.com/jobs">
+        </div>
+        <div class="form-group">
+          <label>ATS Platform</label>
+          <select name="ats_platform">
+            <option value="unknown">Unknown</option>
+            <option value="greenhouse">Greenhouse</option>
+            <option value="lever">Lever</option>
+            <option value="ashby">Ashby</option>
+            <option value="firecrawl">Firecrawl (custom URL)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>ATS Slug</label>
+          <input type="text" name="ats_slug" placeholder="openzeppelin (for greenhouse/lever)">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">Add Company</button>
+    </form>
+  </div>
+
+  <!-- Company list -->
+  {% if companies %}
+  <div class="card">
+    <h2>Company List ({{ companies|length }})</h2>
+    <table class="table">
+      <thead><tr><th>Company</th><th>Domain</th><th>Careers URL</th><th>ATS</th><th>Slug</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for c in companies %}
+        <tr>
+          <td>{{ c.name }}</td>
+          <td><a href="https://{{ c.domain }}" target="_blank">{{ c.domain }}</a></td>
+          <td><a href="{{ c.careers_url }}" target="_blank">{{ c.careers_url[:40] }}...</a></td>
+          <td><span class="source-badge">{{ c.ats_platform }}</span></td>
+          <td>{{ c.ats_slug }}</td>
+          <td><span class="india-badge india-{{ c.crawl_status }}">{{ c.crawl_status }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card">
+    <p class="muted">No companies yet. Add one above.</p>
+  </div>
+  {% endif %}
+</main>
+</body>
+</html>

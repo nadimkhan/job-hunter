@@ -1,705 +1,596 @@
-import uvicorn
-from fastapi import FastAPI, Query, Request, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, PlainTextResponse
-from fastapi.templating import Jinja2Templates
-from typing import Optional
-from pydantic import BaseModel
+"""
+Job Hunter — Main Entry Point
+FastAPI app + Telegram bot (co-running) + APScheduler cron jobs.
+
+Run:
+  python main.py              — starts everything
+  python main.py --web-only  — FastAPI only (no bot/cron)
+  python main.py --bot-only  — Telegram bot only
+"""
+import asyncio, argparse, logging, os, sys
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import aiosqlite
+import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from telegram import Bot
+from telegram.error import Forbidden
 
-from core.database import (
-    init_db, get_jobs, get_job_by_id, update_job_status, get_stats, get_sources,
-    upsert_company, get_companies, get_company_by_id,
-    update_company_crawl_status, get_company_stats,
-    insert_outreach, get_outreach, update_outreach_status, update_outreach_notes,
-    outreach_exists_for_job, get_outreach_stats,
-    toggle_mark_for_email, get_marked_jobs,
-)
-from core.collector import run_collection, run_company_crawl
-from core.sheets import export_to_sheet
-from core.emailer import run_daily_pipeline, send_daily_digest, generate_outreach_for_top_jobs
-from core.profile import (
-    get_active_profile, list_profiles, get_profile, create_profile,
-    update_profile, activate_profile, delete_profile, duplicate_profile,
-    import_preset, export_profile, list_presets,
-    get_active_profile_queries, add_active_profile_query,
-    update_active_profile_query, delete_active_profile_query,
-)
+# ── Local imports ──────────────────────────────────────────────────────────────
 from config.settings import (
-    HOST, PORT, GOOGLE_SHEETS_CREDS, GOOGLE_SHEET_ID, HUNTER_API_KEY,
-    DAILY_EMAIL_HOUR, DAILY_EMAIL_TIMEZONE, SENDER_EMAIL,
+    BASE_DIR, DB_PATH, RESUME_DIR, TELEGRAM_BOT_TOKEN,
+    TELEGRAM_TOPIC_DAILY_DIGEST, TELEGRAM_TOPIC_UPDATES, TELEGRAM_CHAT_ID,
 )
+from core.database import (
+    init_db, get_jobs, get_stats, get_profiles, get_active_profile,
+    create_profile, update_profile, set_active_profile, delete_profile,
+    get_resumes, insert_resume, delete_resume,
+    get_outreach, insert_outreach, update_outreach_status, outreach_exists_for_job,
+    upsert_company, get_companies, get_api_usage, get_last_runs,
+    log_daily_run,
+)
+from core.collector import run_collection, run_firecrawl_url
+from core.hunter import build_linkedin_searches, generate_dm_template
 
-app = FastAPI(title="Job Scraper", version="2.0.0")
-templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# ── Logging ─────────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("job-hunter")
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+scheduler = AsyncIOScheduler()
+BOT_INSTANCE = None
+_telegram_topic_digest = str(TELEGRAM_TOPIC_DAILY_DIGEST) if TELEGRAM_TOPIC_DAILY_DIGEST else ""
+_telegram_topic_updates = str(TELEGRAM_TOPIC_UPDATES) if TELEGRAM_TOPIC_UPDATES else ""
+
+# ── Telegram sender (safe — no error if topic not set) ───────────────────────
+async def send_telegram(text: str, topic_id: str = None):
+    """Send a Telegram message. topic_id enables thread targeting."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning("Telegram not configured — skipping message")
+        return
+    try:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        kwargs: dict = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        if topic_id:
+            kwargs["message_thread_id"] = int(topic_id)
+        await bot.send_message(**kwargs)
+    except Forbidden:
+        log.warning("Telegram bot not in group — add it to the group first")
+    except Exception as e:
+        log.error(f"Telegram send error: {e}")
 
 
-scheduler = AsyncIOScheduler(timezone=DAILY_EMAIL_TIMEZONE)
+# ── Cron: Daily job digest to Telegram ────────────────────────────────────────
+async def cron_daily_digest():
+    """Run every morning, post top jobs to Telegram Daily Digest thread."""
+    log("[CRON] Daily digest starting...")
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    profile = await get_active_profile(db)
 
+    if not profile:
+        log("[CRON] No active profile, skipping digest")
+        await db.close()
+        return
 
-@app.on_event("startup")
-async def startup():
-    init_db()
+    # Get top new jobs from last 24h
+    yesterday = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    jobs = await get_jobs(db, min_score=40, seen_after=yesterday, limit=15)
+    await db.close()
 
-    # Schedule daily digest at configured hour IST. The sender is fixed to
-    # SENDER_EMAIL in .env — it has to match SENDER_APP_PASSWORD.
-    if SENDER_EMAIL:
-        scheduler.add_job(
-            run_daily_pipeline,
-            CronTrigger(hour=DAILY_EMAIL_HOUR, minute=0),
-            id="daily_digest",
-            replace_existing=True,
-            kwargs={"send": True},
-        )
-        scheduler.start()
-        print(f"Scheduled daily digest at {DAILY_EMAIL_HOUR}:00 IST", flush=True)
+    if not jobs:
+        msg = "Good morning! No new highly-relevant jobs in the last 24h. Run /collect to refresh."
     else:
-        print("SENDER_EMAIL not set in .env — daily digest disabled", flush=True)
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    if scheduler.running:
-        scheduler.shutdown()
-
-
-# ── Jobs API ───────────────────────────────────────────────────
-
-@app.get("/api/jobs")
-async def api_get_jobs(
-    source: Optional[str] = None,
-    status: Optional[str] = None,
-    min_score: int = Query(0, ge=0, le=100),
-    search: Optional[str] = None,
-    location: Optional[str] = None,
-    tech: Optional[str] = None,
-    india_friendly: Optional[str] = None,
-    company_domain: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-):
-    jobs = get_jobs(
-        source=source, status=status, min_score=min_score,
-        search=search, location=location, tech=tech,
-        india_friendly=india_friendly, company_domain=company_domain,
-        limit=limit, offset=offset,
-    )
-    return {"jobs": jobs, "count": len(jobs)}
-
-
-@app.get("/api/jobs/{job_id}")
-async def api_get_job(job_id: str):
-    job = get_job_by_id(job_id)
-    if not job:
-        return {"error": "Job not found"}
-    return job
-
-
-@app.patch("/api/jobs/{job_id}/status")
-async def api_update_status(job_id: str, status: str = Query(...)):
-    update_job_status(job_id, status)
-    return {"ok": True}
-
-
-@app.get("/api/stats")
-async def api_stats():
-    return get_stats()
-
-
-@app.get("/api/sources")
-async def api_sources():
-    return {"sources": get_sources()}
-
-
-@app.post("/api/collect")
-async def api_collect(generate_outreach: bool = Query(True)):
-    from datetime import datetime
-    cutoff = datetime.utcnow().isoformat()
-    stats = await run_collection()
-    if generate_outreach:
-        # Only pick from jobs seen in this collection run — avoids re-using
-        # stale 3-year-old python listings still sitting in the DB.
-        stats["outreach_generated"] = generate_outreach_for_top_jobs(seen_after=cutoff)
-    return stats
-
-
-# ── Companies API ──────────────────────────────────────────────
-
-@app.get("/api/companies")
-async def api_get_companies(
-    ats_platform: Optional[str] = None,
-    crawl_status: Optional[str] = None,
-    india_friendly: Optional[str] = None,
-    search: Optional[str] = None,
-    limit: int = Query(200, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-):
-    companies = get_companies(
-        ats_platform=ats_platform, crawl_status=crawl_status,
-        india_friendly=india_friendly, search=search,
-        limit=limit, offset=offset,
-    )
-    return {"companies": companies, "count": len(companies)}
-
-
-class CompanyInput(BaseModel):
-    name: str
-    domain: str = ""
-    careers_url: str = ""
-    ats_platform: str = "unknown"
-    ats_slug: str = ""
-    founded_year: int = 0
-    employee_count: str = ""
-    tags: str = ""
-    india_friendly: str = "unknown"
-    notes: str = ""
-
-
-@app.post("/api/companies")
-async def api_add_company(body: CompanyInput):
-    from core.models import Company
-    data = body.model_dump()
-    data["id"] = Company.make_id(data["name"])
-    data["last_crawled"] = ""
-    data["crawl_status"] = "active"
-    upsert_company(data)
-    return {"ok": True, "id": data["id"]}
-
-
-@app.patch("/api/companies/{company_id}")
-async def api_update_company(company_id: str, body: CompanyInput):
-    existing = get_company_by_id(company_id)
-    if not existing:
-        return {"error": "Not found"}
-    data = body.model_dump()
-    data["id"] = company_id
-    data["last_crawled"] = existing.get("last_crawled", "")
-    data["crawl_status"] = existing.get("crawl_status", "active")
-    upsert_company(data)
-    return {"ok": True}
-
-
-@app.delete("/api/companies/{company_id}")
-async def api_pause_company(company_id: str):
-    from datetime import datetime
-    update_company_crawl_status(company_id, "paused", datetime.utcnow().isoformat())
-    return {"ok": True}
-
-
-@app.post("/api/companies/{company_id}/activate")
-async def api_activate_company(company_id: str):
-    update_company_crawl_status(company_id, "active")
-    return {"ok": True}
-
-
-@app.get("/api/companies/stats")
-async def api_company_stats():
-    return get_company_stats()
-
-
-@app.post("/api/companies/seed")
-async def api_seed_companies():
-    from core.company_seeder import get_all_seed_companies
-    companies = get_all_seed_companies()
-    added = 0
-    for c in companies:
-        if upsert_company(c):
-            added += 1
-    return {"seeded": len(companies), "added": added}
-
-
-@app.post("/api/companies/mega-seed")
-async def api_mega_seed():
-    """Load 250+ Indian + MNC + Global remote companies."""
-    from core.mega_companies import get_all_mega_companies
-    companies = get_all_mega_companies()
-    added = 0
-    for c in companies:
-        if upsert_company(c):
-            added += 1
-    return {"total_in_list": len(companies), "added": added}
-
-
-@app.post("/api/companies/{company_id}/crawl")
-async def api_crawl_company(company_id: str):
-    stats = await run_company_crawl(company_ids=[company_id])
-    return stats
-
-
-@app.post("/api/companies/crawl")
-async def api_crawl_all_companies():
-    stats = await run_company_crawl()
-    return stats
-
-
-@app.post("/api/companies/detect-ats")
-async def api_detect_ats(domain: str = Query(...)):
-    from core.company_seeder import detect_ats_platform
-    result = await detect_ats_platform(domain)
-    return result
-
-
-@app.post("/api/companies/discover")
-async def api_discover_companies(
-    sources: str = Query("yc,remoteintech,wwr"),
-    detect_ats: bool = Query(True),
-    min_team_size: int = Query(10, ge=1),
-):
-    """Bulk discover companies from YC, RemoteInTech, WeWorkRemotely."""
-    from core.bulk_discover import run_bulk_discovery
-    source_list = [s.strip() for s in sources.split(",") if s.strip()]
-    stats = await run_bulk_discovery(
-        sources=source_list, detect_ats=detect_ats, min_team_size=min_team_size,
-    )
-    return stats
-
-
-# ── Google Sheets Export ───────────────────────────────────────
-
-@app.post("/api/export/sheets")
-async def api_export_sheets(
-    min_score: int = Query(0, ge=0, le=100),
-    india_friendly: Optional[str] = None,
-    source: Optional[str] = None,
-    search: Optional[str] = None,
-    tech: Optional[str] = None,
-    mode: str = Query("replace"),
-    sheet_name: str = Query("Jobs"),
-):
-    import os
-    creds = GOOGLE_SHEETS_CREDS
-    sheet_id = GOOGLE_SHEET_ID
-    if not sheet_id:
-        return {"error": "GOOGLE_SHEET_ID not set in .env"}
-    if not os.path.exists(creds):
-        return {"error": f"Credentials file not found: {creds}"}
-    try:
-        result = export_to_sheet(
-            creds_file=creds, spreadsheet_id=sheet_id, sheet_name=sheet_name,
-            min_score=min_score, india_friendly=india_friendly,
-            source=source, search=search, tech=tech, mode=mode,
-        )
-        return result
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/export/sheets/status")
-async def api_sheets_status():
-    import os
-    return {
-        "configured": bool(GOOGLE_SHEET_ID) and os.path.exists(GOOGLE_SHEETS_CREDS),
-        "sheet_id": GOOGLE_SHEET_ID[:10] + "..." if GOOGLE_SHEET_ID else "",
-        "creds_exists": os.path.exists(GOOGLE_SHEETS_CREDS),
-    }
-
-
-# ── Outreach API ───────────────────────────────────────────────
-
-@app.get("/api/outreach")
-async def api_get_outreach(
-    status: Optional[str] = None,
-    search: Optional[str] = None,
-    batch: Optional[str] = Query(None, pattern="^(new|old|all)$"),
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-):
-    from core.database import get_last_outreach_batch_at
-    batch_filter = batch if batch in ("new", "old") else None
-    items = get_outreach(status=status, search=search, batch=batch_filter,
-                         limit=limit, offset=offset)
-    return {
-        "outreach": items,
-        "count": len(items),
-        "last_batch_at": get_last_outreach_batch_at(),
-    }
-
-
-@app.get("/api/outreach/stats")
-async def api_outreach_stats():
-    return get_outreach_stats()
-
-
-class OutreachBulkDelete(BaseModel):
-    ids: list[str]
-
-
-@app.post("/api/outreach/bulk-delete")
-async def api_outreach_bulk_delete(body: OutreachBulkDelete):
-    from core.database import delete_outreach_bulk
-    deleted = delete_outreach_bulk(body.ids)
-    return {"deleted": deleted}
-
-
-@app.post("/api/outreach/refresh")
-async def api_outreach_refresh(limit: int = Query(15, ge=1, le=50),
-                               min_score: int = Query(40, ge=0, le=100)):
-    """Refresh = run a fresh collection, then generate outreach scoped to the
-    jobs that were actually returned by that collection. Previous batches stay
-    in place and show up in the 'Old' tab."""
-    from datetime import datetime
-    cutoff = datetime.utcnow().isoformat()
-    collect_stats = await run_collection()
-    generated = generate_outreach_for_top_jobs(
-        limit=limit, min_score=min_score, seen_after=cutoff,
-    )
-    return {"collected": collect_stats, "generated": generated}
-
-
-@app.post("/api/outreach/generate")
-async def api_generate_outreach(
-    min_score: int = Query(40, ge=0, le=100),
-    limit: int = Query(15, ge=1, le=50),
-    india_friendly: Optional[str] = "maybe",
-):
-    """For top N high-scoring jobs without existing outreach,
-    build LinkedIn search URLs + generate DMs. No API credits used."""
-    generated = generate_outreach_for_top_jobs(
-        limit=limit, min_score=min_score, india_friendly=india_friendly,
-    )
-    if generated == 0:
-        return {"generated": 0, "message": "No new jobs eligible for outreach"}
-    return {"generated": generated}
-
-
-@app.patch("/api/outreach/{outreach_id}/status")
-async def api_update_outreach(outreach_id: str, status: str = Query(...)):
-    field_map = {"messaged": "messaged", "replied": "replied", "followed_up": "followed_up"}
-    update_outreach_status(outreach_id, status, field=field_map.get(status))
-    return {"ok": True}
-
-
-@app.patch("/api/outreach/{outreach_id}/notes")
-async def api_update_outreach_notes(outreach_id: str, notes: str = Query("")):
-    update_outreach_notes(outreach_id, notes)
-    return {"ok": True}
-
-
-# ── Search Queries (stored on the active profile) ──────────────
-
-@app.get("/api/search-queries")
-async def api_get_queries():
-    return {"queries": get_active_profile_queries()}
-
-
-class QueryInput(BaseModel):
-    query: str
-    country: str = "IN"
-    date_posted: str = "3days"
-    remote_jobs_only: bool = False
-
-
-@app.post("/api/search-queries")
-async def api_add_query(body: QueryInput):
-    try:
-        qid = add_active_profile_query(
-            body.query, body.country, body.date_posted, body.remote_jobs_only,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"id": qid, "ok": True}
-
-
-class QueryPatch(BaseModel):
-    query: Optional[str] = None
-    country: Optional[str] = None
-    date_posted: Optional[str] = None
-    remote_jobs_only: Optional[bool] = None
-    enabled: Optional[bool] = None
-
-
-@app.patch("/api/search-queries/{qid}")
-async def api_update_query(qid: int, body: QueryPatch):
-    try:
-        update_active_profile_query(qid, **body.model_dump(exclude_none=True))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"ok": True}
-
-
-@app.delete("/api/search-queries/{qid}")
-async def api_delete_query(qid: int):
-    try:
-        delete_active_profile_query(qid)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"ok": True}
-
-
-# ── Mark Job for Email ─────────────────────────────────────────
-
-@app.post("/api/jobs/{job_id}/mark-for-email")
-async def api_mark_for_email(job_id: str):
-    new_state = toggle_mark_for_email(job_id)
-    return {"mark_for_email": new_state}
-
-
-@app.get("/api/jobs/marked")
-async def api_get_marked():
-    return {"jobs": get_marked_jobs()}
-
-
-# ── Email Digest API ───────────────────────────────────────────
-
-@app.post("/api/email/send-now")
-async def api_send_email_now(dry_run: bool = Query(False)):
-    """Manually trigger the daily digest email."""
-    result = send_daily_digest(dry_run=dry_run)
-    return result
-
-
-@app.post("/api/email/run-pipeline")
-async def api_run_pipeline(send: bool = Query(True)):
-    """Manually run the full daily pipeline: collect → outreach → email."""
-    result = await run_daily_pipeline(send=send)
-    return result
-
-
-@app.get("/api/email/status")
-async def api_email_status():
-    from core.database import get_email_logs
-    import os
-    logs = get_email_logs(limit=10)
-    out_cfg = get_active_profile().get("outreach") or {}
-    profile_recipient = (out_cfg.get("recipient_email") or "").strip()
-    env_recipient = os.getenv("RECIPIENT_EMAIL", "")
-    effective_recipient = profile_recipient or env_recipient
-    return {
-        "sender_configured": bool(SENDER_EMAIL) and bool(os.getenv("SENDER_APP_PASSWORD")),
-        "sender": SENDER_EMAIL,
-        "sender_source": "env" if SENDER_EMAIL else "none",
-        "recipient": effective_recipient,
-        "recipient_source": "profile" if profile_recipient else ("env" if env_recipient else "none"),
-        "candidate_name": out_cfg.get("candidate_name") or "",
-        "scheduled_hour": DAILY_EMAIL_HOUR,
-        "timezone": DAILY_EMAIL_TIMEZONE,
-        "recent_sends": logs,
-    }
-
-
-@app.get("/api/jsearch/status")
-async def api_jsearch_status():
-    from core.database import get_api_usage
-    import os
-    usage = get_api_usage("jsearch")
-    # Free tier: 200 requests/month
-    monthly_limit = 200
-    return {
-        "configured": bool(os.getenv("RAPIDAPI_KEY")),
-        "month": usage["month"],
-        "today": usage["today"],
-        "total": usage["total"],
-        "monthly_limit": monthly_limit,
-        "remaining": max(0, monthly_limit - usage["month"]),
-    }
-
-
-@app.get("/api/hunter/status")
-async def api_hunter_status():
-    import httpx
-    if not HUNTER_API_KEY:
-        return {"configured": False}
-    try:
-        resp = httpx.get(
-            "https://api.hunter.io/v2/account",
-            params={"api_key": HUNTER_API_KEY}, timeout=10,
-        )
-        data = resp.json()
-        if "data" in data:
-            return {
-                "configured": True,
-                "plan": data["data"].get("plan_name", ""),
-                "used": data["data"].get("requests", {}).get("used", 0),
-                "available": data["data"].get("requests", {}).get("available", 0),
-            }
-        return {"configured": True, "error": "could not fetch stats"}
-    except Exception as e:
-        return {"configured": True, "error": str(e)}
-
-
-# ── Profiles API ───────────────────────────────────────────────
-
-@app.get("/api/profiles")
-async def api_list_profiles():
-    return {"profiles": list_profiles(), "presets": list_presets()}
-
-
-@app.get("/api/profiles/active")
-async def api_active_profile():
-    cfg = get_active_profile()
-    return {
-        "id": cfg.get("_id"),
-        "name": cfg.get("_name"),
-        "config": {k: v for k, v in cfg.items() if not k.startswith("_")},
-    }
-
-
-@app.get("/api/profiles/{pid}")
-async def api_get_profile(pid: int):
-    row = get_profile(pid)
-    if not row:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    return row
-
-
-class ProfileInput(BaseModel):
-    name: str
-    description: str = ""
-    config: dict
-
-
-@app.post("/api/profiles")
-async def api_create_profile(body: ProfileInput):
-    try:
-        pid = create_profile(body.name, body.config, body.description)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"id": pid, "ok": True}
-
-
-@app.put("/api/profiles/{pid}")
-async def api_update_profile(pid: int, body: ProfileInput):
-    if not get_profile(pid):
-        raise HTTPException(status_code=404, detail="Profile not found")
-    update_profile(pid, config=body.config, name=body.name,
-                   description=body.description)
-    return {"ok": True}
-
-
-@app.post("/api/profiles/{pid}/activate")
-async def api_activate_profile(pid: int):
-    try:
-        activate_profile(pid)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    # Queries now live on the profile itself — no separate seeding needed.
-    queries_count = len((get_profile(pid) or {}).get("config", {}).get("search", {}).get("jsearch_default_queries") or [])
-    return {"ok": True, "active": pid, "queries": queries_count}
-
-
-@app.post("/api/profiles/{pid}/duplicate")
-async def api_duplicate_profile(pid: int, name: Optional[str] = Query(None)):
-    try:
-        new_id = duplicate_profile(pid, new_name=name)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return {"ok": True, "id": new_id}
-
-
-@app.delete("/api/profiles/{pid}")
-async def api_delete_profile(pid: int):
-    try:
-        delete_profile(pid)
-    except ValueError as e:
-        # Thrown when trying to delete the active profile
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"ok": True}
-
-
-class PresetImport(BaseModel):
-    preset_slug: str
-    activate: bool = False
-    overwrite: bool = False
-
-
-@app.post("/api/profiles/import")
-async def api_import_preset(body: PresetImport):
-    try:
-        pid = import_preset(body.preset_slug, activate=body.activate,
-                            overwrite=body.overwrite)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    queries_count = len((get_profile(pid) or {}).get("config", {}).get("search", {}).get("jsearch_default_queries") or [])
-    return {"ok": True, "id": pid, "queries": queries_count}
-
-
-@app.get("/api/profiles/{pid}/export")
-async def api_export_profile(pid: int):
-    try:
-        yaml_text = export_profile(pid)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return PlainTextResponse(yaml_text, media_type="application/x-yaml")
-
-
-@app.post("/api/profiles/rescore-all")
-async def api_rescore_all(
-    delete_below_min: bool = Query(False),
-):
-    """Re-score every job against the active profile. Optionally delete jobs
-    that now score below the profile's min_score_to_store."""
-    from core.database import get_connection
-    from core.scorer import score_job
-
-    profile = get_active_profile()
-    profile_id = profile.get("_id")
-    min_store = int((profile.get("scoring") or {}).get("min_score_to_store", 25))
-
-    conn = get_connection()
-    try:
-        rows = conn.execute(
-            "SELECT id, title, description, location, tech_stack FROM jobs"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    updated = 0
-    deleted = 0
-    conn = get_connection()
-    try:
-        for r in rows:
-            result = score_job(r["title"], r["description"] or "",
-                               r["location"] or "", profile=profile)
-
-            if delete_below_min and result["score"] < min_store:
-                conn.execute("DELETE FROM jobs WHERE id = ?", (r["id"],))
-                deleted += 1
-                continue
-
-            existing_tech = set(
-                t.strip() for t in (r["tech_stack"] or "").split(",") if t.strip()
+        lines = [f"*Good morning! {len(jobs)} new/relevant jobs:*\n"]
+        for i, job in enumerate(jobs, 1):
+            score = job.get("relevance_score", 0)
+            india = job.get("india_friendly", "?")
+            lines.append(
+                f"{i}. *{job['title']}* @ {job['company']}\n"
+                f"   Score:{score} | India:{india} | {job.get('location', 'Remote')}\n"
+                f"   {job.get('url', '')[:80]}"
             )
-            existing_tech.update(result["tech_stack"])
-            tech_stack = ", ".join(sorted(existing_tech))
+        msg = "\n".join(lines)
 
-            conn.execute(
-                "UPDATE jobs SET relevance_score = ?, experience_level = ?, "
-                "india_friendly = ?, location_note = ?, tech_stack = ?, "
-                "scored_profile_id = ? WHERE id = ?",
-                (result["score"], result["experience_level"],
-                 result["india_friendly"], result["location_note"],
-                 tech_stack, profile_id, r["id"]),
-            )
-            updated += 1
-        conn.commit()
-    finally:
-        conn.close()
-
-    return {"ok": True, "scanned": len(rows), "updated": updated, "deleted": deleted}
+    await send_telegram(msg, topic_id=_telegram_topic_digest)
+    log(f"[CRON] Digest sent: {len(jobs)} jobs")
 
 
-# ── UI Routes ──────────────────────────────────────────────────
+# ── Cron: Job collection (every 8h, 3 JSearch reqs max) ───────────────────────
+async def cron_collect():
+    """Run every 8 hours. JSearch capped at 3 queries inside run_collection."""
+    log("[CRON] Collection starting...")
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    profile = await get_active_profile(db)
+    await db.close()
+
+    if not profile:
+        log("[CRON] No active profile, skipping collection")
+        return
+
+    try:
+        stats = await run_collection(profile["config"], include_companies=True)
+        msg = (
+            f"[CRON] Collection done — "
+            f"fetched:{stats['fetched']} new:{stats['new']} "
+            f"updated:{stats['updated']} jsearch:{stats.get('jsearch_used', 0)}"
+        )
+    except Exception as e:
+        msg = f"[CRON] Collection failed: {e}"
+        log.error(msg)
+
+    await send_telegram(msg, topic_id=_telegram_topic_updates)
+    log("[CRON] Collection done")
+
+
+# ── Lifespan: startup / shutdown ───────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await init_db()
+    log("Database initialised")
+
+    # Schedule cron jobs
+    scheduler.add_job(cron_daily_digest, "cron", hour=8, minute=0,
+                      id="daily_digest", replace_existing=True)
+    scheduler.add_job(cron_collect, IntervalTrigger(hours=8),
+                      id="collect_8h", replace_existing=True)
+    scheduler.start()
+    log("Scheduler started (daily_digest at 08:00 UTC, collection every 8h)")
+
+    # Start Telegram bot in background
+    if TELEGRAM_BOT_TOKEN:
+        from bot.handlers import setup_bot
+        global BOT_INSTANCE
+        bot_app = setup_bot()
+        asyncio.create_task(bot_app.run())
+        BOT_INSTANCE = bot_app
+        log("Telegram bot started")
+
+    yield
+
+    # Shutdown
+    scheduler.shutdown(wait=False)
+    log("Scheduler stopped")
+
+
+# ── FastAPI App ─────────────────────────────────────────────────────────────────
+app = FastAPI(title="Job Hunter", lifespan=lifespan)
+
+# Static + templates
+STATIC_DIR = BASE_DIR / "web" / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def render(template_name: str, request: Request, **kwargs):
+    return templates.TemplateResponse(
+        template_name, {"request": request, **kwargs}
+    )
+
+
+def parse_bool(val) -> bool:
+    return str(val).lower() in ("1", "true", "yes", "on")
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    return RedirectResponse(url="/web/dashboard")
+
+
+# ══════════════════════════════════════════════════════════════
+#  WEB ROUTES
+# ══════════════════════════════════════════════════════════════
+
+# ── Dashboard ──────────────────────────────────────────────
+@app.get("/web/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    return templates.TemplateResponse(request, "dashboard.html")
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    stats = await get_stats(db)
+    jsearch = await get_api_usage(db, "jsearch")
+    profile = await get_active_profile(db)
+    last_runs = await get_last_runs(db, limit=5)
+    await db.close()
+
+    return render("dashboard.html", request,
+        page="dashboard",
+        stats=stats,
+        jsearch=jsearch,
+        active_profile=profile,
+        last_runs=last_runs,
+    )
 
 
-@app.get("/outreach", response_class=HTMLResponse)
-async def outreach_page(request: Request):
-    return templates.TemplateResponse(request, "outreach.html")
+# ── Jobs ───────────────────────────────────────────────────
+@app.get("/web/jobs", response_class=HTMLResponse)
+async def jobs_page(request: Request,
+                    source: str = None,
+                    status: str = None,
+                    search: str = None,
+                    india: str = None,
+                    min_score: int = 0,
+                    limit: int = 50,
+                    offset: int = 0):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    jobs = await get_jobs(db, source=source, status=status, search=search,
+                          india_friendly=india, min_score=min_score,
+                          limit=limit, offset=offset)
+    total_count = len(jobs)  # simple, not paginated count
+    await db.close()
+    return render("jobs.html", request,
+        page="jobs", jobs=jobs, filters={
+            "source": source or "", "status": status or "",
+            "search": search or "", "india": india or "",
+            "min_score": min_score, "limit": limit, "offset": offset,
+        })
 
 
-@app.get("/profile", response_class=HTMLResponse)
-async def profile_page(request: Request):
-    return templates.TemplateResponse(request, "profile.html")
+@app.post("/web/jobs/{job_id}/status")
+async def update_job_web(job_id: str, status: str = Form(...)):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    from core.database import update_job_status as _update
+    await _update(db, job_id, status)
+    await db.close()
+    return RedirectResponse(url="/web/jobs", status_code=303)
+
+
+# ── Profiles ───────────────────────────────────────────────
+@app.get("/web/profiles", response_class=HTMLResponse)
+async def profiles_page(request: Request):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    profiles = await get_profiles(db)
+    await db.close()
+    return render("profiles.html", request, page="profiles", profiles=profiles)
+
+
+@app.get("/web/profiles/new", response_class=HTMLResponse)
+async def new_profile_page(request: Request):
+    return render("profile_edit.html", request, page="profiles", profile=None, is_new=True)
+
+
+@app.post("/web/profiles/new")
+async def create_profile_web(request: Request,
+                               name: str = Form(...),
+                               description: str = Form(""),
+                               yaml_config: str = Form("")):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    try:
+        if yaml_config.strip():
+            config = yaml.safe_load(yaml_config) or {}
+        else:
+            config = {
+                "search": {
+                    "title_keywords_positive": [],
+                    "title_keywords_negative": [],
+                    "relevant_tech": [],
+                    "jsearch_default_queries": [],
+                },
+                "scoring": {
+                    "weights": {"title": 35, "tech": 35, "experience": 15, "signal": 15},
+                    "core_tech": [],
+                    "backend_signals": [],
+                    "experience_bonuses": {},
+                },
+                "location": {
+                    "india_positive": ["india", "remote", "worldwide"],
+                    "india_negative": [],
+                    "timezone_compatible": [],
+                    "timezone_incompatible": [],
+                },
+                "outreach": {
+                    "candidate_name": "Nadim Khan",
+                    "candidate_core_tech": [],
+                    "candidate_extra_tech": [],
+                    "linkedin_search_titles": [],
+                    "dm_short_template": "",
+                    "dm_long_template": "",
+                },
+            }
+        pid = await create_profile(db, name, description, config)
+        # Set as active if first profile
+        profiles = await get_profiles(db)
+        if len(profiles) == 1:
+            await set_active_profile(db, pid)
+        await db.close()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return RedirectResponse(url="/web/profiles", status_code=303)
+
+
+@app.get("/web/profiles/{profile_id}/edit", response_class=HTMLResponse)
+async def edit_profile_page(request: Request, profile_id: int):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    profiles = await get_profiles(db)
+    profile = next((p for p in profiles if p["id"] == profile_id), None)
+    await db.close()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return render("profile_edit.html", request, page="profiles",
+                  profile=profile, is_new=False)
+
+
+@app.post("/web/profiles/{profile_id}/edit")
+async def edit_profile_web(request: Request, profile_id: int,
+                             name: str = Form(...),
+                             description: str = Form(""),
+                             yaml_config: str = Form("")):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    try:
+        config = yaml.safe_load(yaml_config) if yaml_config.strip() else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid YAML")
+    await update_profile(db, profile_id, name, description, config)
+    await db.close()
+    return RedirectResponse(url="/web/profiles", status_code=303)
+
+
+@app.post("/web/profiles/{profile_id}/activate")
+async def activate_profile(profile_id: int):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    await set_active_profile(db, profile_id)
+    await db.close()
+    return RedirectResponse(url="/web/profiles", status_code=303)
+
+
+@app.post("/web/profiles/{profile_id}/delete")
+async def delete_profile_web(profile_id: int):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    await delete_profile(db, profile_id)
+    await db.close()
+    return RedirectResponse(url="/web/profiles", status_code=303)
+
+
+# ── Resumes ────────────────────────────────────────────────
+@app.get("/web/resumes", response_class=HTMLResponse)
+async def resumes_page(request: Request):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    resumes = await get_resumes(db)
+    profiles = await get_profiles(db)
+    await db.close()
+    return render("resumes.html", request, page="resumes",
+                  resumes=resumes, profiles=profiles)
+
+
+@app.post("/web/resumes/upload")
+async def upload_resume_web(
+        request: Request,
+        role_name: str = Form(...),
+        profile_id: int = Form(1),
+        file: UploadFile = File(...)):
+    if not file.filename.lower().endswith((".pdf", ".docx", ".doc")):
+        raise HTTPException(status_code=400, detail="Only PDF or DOCX files")
+
+    RESUME_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(c for c in role_name if c.isalnum() or c in (" ", "-", "_")).strip()
+    safe_name = safe_name.replace(" ", "_")[:50]
+    ext = Path(file.filename).suffix.lower()
+    dest = RESUME_DIR / f"{safe_name}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{ext}"
+
+    with open(dest, "wb") as f:
+        content = await file.read()
+        f.write(content)
+
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    await insert_resume(db, profile_id, role_name, str(dest), file.filename, len(content))
+    await db.close()
+
+    return RedirectResponse(url="/web/resumes", status_code=303)
+
+
+@app.post("/web/resumes/{resume_id}/delete")
+async def delete_resume_web(resume_id: int):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    # Get path before deleting
+    resumes = await get_resumes(db)
+    resume = next((r for r in resumes if r["id"] == resume_id), None)
+    if resume and resume.get("file_path"):
+        try:
+            os.remove(resume["file_path"])
+        except Exception:
+            pass
+    await delete_resume(db, resume_id)
+    await db.close()
+    return RedirectResponse(url="/web/resumes", status_code=303)
+
+
+# ── Companies ──────────────────────────────────────────────
+@app.get("/web/companies", response_class=HTMLResponse)
+async def companies_page(request: Request, search: str = None):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    companies = await get_companies(db, search=search)
+    await db.close()
+    return render("companies.html", request, page="companies",
+                  companies=companies, search=search or "")
+
+
+@app.post("/web/companies/add")
+async def add_company_web(request: Request,
+                           name: str = Form(...),
+                           domain: str = Form(""),
+                           careers_url: str = Form(""),
+                           ats_platform: str = Form("unknown"),
+                           ats_slug: str = Form("")):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    await upsert_company(db, {
+        "name": name, "domain": domain, "careers_url": careers_url,
+        "ats_platform": ats_platform, "ats_slug": ats_slug,
+        "crawl_status": "active",
+    })
+    await db.close()
+    return RedirectResponse(url="/web/companies", status_code=303)
+
+
+# ── Outreach ───────────────────────────────────────────────
+@app.get("/web/outreach", response_class=HTMLResponse)
+async def outreach_page(request: Request, status: str = None):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    outreach = await get_outreach(db, status=status)
+    jobs_cursor = await db.execute(
+        "SELECT id, title, company FROM jobs ORDER BY discovered_at DESC LIMIT 200"
+    )
+    jobs = [dict(zip([d[0] for d in jobs_cursor.description], r))
+            for r in await jobs_cursor.fetchall()]
+    await db.close()
+    return render("outreach.html", request, page="outreach",
+                  outreach=outreach, jobs=jobs, filter_status=status or "")
+
+
+@app.post("/web/outreach/generate/{job_id}")
+async def generate_outreach_web(job_id: str, profile_id: int = Form(0)):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+
+    job = await get_jobs(db, limit=1000)
+    job = next((j for j in job if j.get("id") == job_id), None)
+    if not job:
+        await db.close()
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    profile = await get_active_profile(db) if not profile_id else None
+    if not profile:
+        if profile_id:
+            profiles = await get_profiles(db)
+            profile = next((p for p in profiles if p["id"] == profile_id), None)
+    await db.close()
+
+    if not profile:
+        raise HTTPException(status_code=400, detail="No active profile")
+
+    outreach_cfg = profile.get("config", {}).get("outreach", {})
+    searches = build_linkedin_searches(job.get("company", ""), outreach_cfg)
+    dms = generate_dm_template(job, outreach_cfg)
+
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    await insert_outreach(db, {
+        "job_id": job_id,
+        "job_title": job.get("title", ""),
+        "company": job.get("company", ""),
+        "company_domain": job.get("company_domain", ""),
+        "contact_name": "[Search LinkedIn]",
+        "contact_linkedin": searches[0]["url"] if searches else "",
+        "dm_short": dms["short"],
+        "dm_long": dms["long"],
+        "profile_id": profile.get("id", 0),
+    })
+    await db.close()
+    return RedirectResponse(url="/web/outreach", status_code=303)
+
+
+@app.post("/web/outreach/{outreach_id}/status")
+async def update_outreach_web(outreach_id: int, status: str = Form(...)):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    await update_outreach_status(db, outreach_id, status)
+    await db.close()
+    return RedirectResponse(url="/web/outreach", status_code=303)
+
+
+# ── Collect (manual trigger) ──────────────────────────────
+@app.post("/web/collect")
+async def trigger_collect_web(request: Request):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    profile = await get_active_profile(db)
+    await db.close()
+
+    if not profile:
+        raise HTTPException(status_code=400, detail="No active profile")
+
+    stats = await run_collection(profile["config"])
+    return render("collect_result.html", request, page="collect",
+                  stats=stats)
+
+
+# ── Firecrawl (manual trigger) ────────────────────────────
+@app.post("/web/firecrawl")
+async def trigger_firecrawl_web(request: Request,
+                                 url: str = Form(...),
+                                 company_name: str = Form("")):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    profile = await get_active_profile(db)
+    await db.close()
+
+    if not profile:
+        raise HTTPException(status_code=400, detail="No active profile")
+
+    name = company_name or url.split("/")[2].replace("www.", "").split(".")[0].title()
+    stats = await run_firecrawl_url(url, name, profile["config"], db)
+    return render("collect_result.html", request, page="firecrawl", stats=stats)
+
+
+# ── Status API ────────────────────────────────────────────
+@app.get("/api/stats")
+async def api_stats():
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    stats = await get_stats(db)
+    jsearch = await get_api_usage(db, "jsearch")
+    await db.close()
+    return {**stats, "jsearch": jsearch}
+
+
+@app.get("/api/jobs")
+async def api_jobs(source: str = None, status: str = None,
+                   search: str = None, min_score: int = 0,
+                   limit: int = 50, offset: int = 0):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    jobs = await get_jobs(db, source=source, status=status, search=search,
+                          min_score=min_score, limit=limit, offset=offset)
+    await db.close()
+    return {"count": len(jobs), "jobs": jobs}
+
+
+# ── CLI-mode runner ───────────────────────────────────────
+def run():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--web-only", action="store_true")
+    parser.add_argument("--bot-only", action="store_true")
+    args = parser.parse_args()
+
+    if args.bot_only:
+        if not TELEGRAM_BOT_TOKEN:
+            print("TELEGRAM_BOT_TOKEN not set in .env")
+            sys.exit(1)
+        from bot.handlers import setup_bot
+        app_bot = setup_bot()
+        print("Starting Telegram bot...")
+        app_bot.run()
+    else:
+        import uvicorn
+        port = int(os.getenv("PORT", 8000))
+        uvicorn.run("main:app", host="0.0.0.0", port=port,
+                    reload=os.getenv("DEBUG", "0") == "1")
 
 
 if __name__ == "__main__":
-    print(f"Starting Job Scraper at http://{HOST}:{PORT}")
-    uvicorn.run("main:app", host=HOST, port=PORT, reload=True)
+    run()

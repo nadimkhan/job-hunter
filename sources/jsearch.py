@@ -1,13 +1,24 @@
-"""JSearch via RapidAPI — aggregates jobs from LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs.
-Free tier: 200 requests/month (each request returns 10 jobs).
-Docs: https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch
-"""
-
+"""JSearch via RapidAPI — aggregates LinkedIn, Indeed, Glassdoor, ZipRecruiter.
+Rate-limited: max 3 queries per collection run, max 6 runs/day (18 reqs/day → ~540/mo).
+Free tier: 200 req/month. We cap at 180/mo to stay safe."""
 import httpx
 from sources.base import BaseSource
 from core.models import Job
 from config.settings import RAPIDAPI_KEY
-from core.database import log_api_call
+
+# These are injected at runtime by collector
+_global_usage = {"daily": 0, "monthly": 0}
+_daily_limit = 18      # max JSearch calls per day
+_monthly_limit = 180   # max per month (stay under 200 free tier)
+
+
+def can_use_jsearch() -> bool:
+    return bool(RAPIDAPI_KEY) and _global_usage["daily"] < _daily_limit and _global_usage["monthly"] < _monthly_limit
+
+
+def set_usage(daily: int, monthly: int):
+    _global_usage["daily"] = daily
+    _global_usage["monthly"] = monthly
 
 
 class JSearchSource(BaseSource):
@@ -15,48 +26,70 @@ class JSearchSource(BaseSource):
     BASE_URL = "https://jsearch.p.rapidapi.com/search"
 
     def __init__(self, queries: list[dict] = None):
-        # Queries are now sourced from the DB (search_queries table), which is
-        # seeded per profile on activation / preset import. If the caller passes
-        # nothing, this source is a no-op (returns empty list from fetch()).
-        self.queries = queries or []
-        self.api_key = RAPIDAPI_KEY
+        self.queries = (queries or [])[:3]  # max 3 per run, enforced here too
 
     async def fetch(self) -> list[Job]:
-        if not self.api_key:
+        if not RAPIDAPI_KEY:
+            self.log("No RAPIDAPI_KEY, skipping")
+            return []
+
+        if not can_use_jsearch():
+            remaining_day = _daily_limit - _global_usage["daily"]
+            remaining_month = _monthly_limit - _global_usage["monthly"]
+            self.log(f"Rate limit reached (daily:{remaining_day} left, monthly:{remaining_month} left), skipping")
             return []
 
         headers = {
             "x-rapidapi-host": "jsearch.p.rapidapi.com",
-            "x-rapidapi-key": self.api_key,
+            "x-rapidapi-key": RAPIDAPI_KEY,
         }
 
         all_jobs = []
+        queries_to_run = self.queries[:3]  # hard cap at 3
+
         async with httpx.AsyncClient(timeout=60) as client:
-            for q in self.queries:
+            for q in queries_to_run:
+                if not can_use_jsearch():
+                    self.log("Rate limit hit mid-run, stopping")
+                    break
+
                 try:
-                    params = {**q, "page": 1, "num_pages": 1, "employment_types": "FULLTIME"}
+                    params = {
+                        **q,
+                        "page": 1,
+                        "num_pages": 1,
+                        "employment_types": "FULLTIME",
+                    }
                     resp = await client.get(self.BASE_URL, headers=headers, params=params)
-                    success = resp.status_code == 200
-                    log_api_call("jsearch", success=success, notes=q.get("query", ""))
-                    if not success:
+                    if resp.status_code != 200:
+                        self.log(f"HTTP {resp.status_code} for query: {q.get('query', '')}")
                         continue
+
                     data = resp.json()
                     for item in data.get("data", []):
                         job = self._map_job(item)
                         if job:
                             all_jobs.append(job)
+
+                    # Track usage
+                    _global_usage["daily"] += 1
+                    _global_usage["monthly"] += 1
+                    self.log(f"Query done: {q.get('query', '')} ({len(data.get('data', []))} jobs)")
+
                 except Exception as e:
-                    log_api_call("jsearch", success=False, notes=str(e)[:100])
+                    self.log(f"Error: {e}")
                     continue
 
+        self.log(f"Total: {len(all_jobs)} jobs from JSearch")
         return all_jobs
 
-    def _map_job(self, item: dict) -> Job:
-        location_parts = [
-            item.get("job_city", ""),
-            item.get("job_state", ""),
-            item.get("job_country", ""),
-        ]
+    def _map_job(self, item: dict) -> Job | None:
+        title = item.get("job_title", "")
+        company = item.get("employer_name", "")
+        if not title or not company:
+            return None
+
+        location_parts = [item.get("job_city", ""), item.get("job_state", ""), item.get("job_country", "")]
         location = ", ".join(p for p in location_parts if p) or "Remote"
         if item.get("job_is_remote"):
             location = "Remote" if not location_parts[0] else f"Remote / {location}"
@@ -66,20 +99,18 @@ class JSearchSource(BaseSource):
             period = item.get("job_salary_period", "year").lower()
             salary = f"${item['job_min_salary']:,} - ${item['job_max_salary']:,} / {period}"
 
-        # Apply URL — prefer official apply link
         url = item.get("job_apply_link", "") or item.get("job_google_link", "")
 
-        # Extract company domain from apply link
         domain = ""
-        employer_website = item.get("employer_website", "")
-        if employer_website:
-            domain = employer_website.replace("https://", "").replace("http://", "").replace("www.", "").rstrip("/")
+        emp_website = item.get("employer_website", "")
+        if emp_website:
+            domain = emp_website.replace("https://", "").replace("http://", "").replace("www.", "").rstrip("/")
 
-        return Job(
-            title=item.get("job_title", ""),
-            company=item.get("employer_name", ""),
+        job = Job(
+            title=title,
+            company=company,
             location=location,
-            description=item.get("job_description", "")[:5000],  # truncate huge descriptions
+            description=item.get("job_description", "")[:5000],
             url=url,
             source="jsearch",
             posted_date=item.get("job_posted_at_datetime_utc", "") or item.get("job_posted_at", ""),
@@ -87,3 +118,5 @@ class JSearchSource(BaseSource):
             salary=salary,
             job_type=item.get("job_employment_type", "FULLTIME").lower(),
         )
+        job.id = job.make_fingerprint()
+        return job

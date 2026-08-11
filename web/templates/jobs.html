@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jobs — Job Hunter</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard">Dashboard</a>
+  <a href="/web/jobs" class="active">Jobs</a>
+  <a href="/web/profiles">Profiles</a>
+  <a href="/web/resumes">Resumes</a>
+  <a href="/web/companies">Companies</a>
+  <a href="/web/outreach">Outreach</a>
+</nav>
+
+<main class="container">
+  <div class="page-header">
+    <h1>Jobs ({{ jobs|length }})</h1>
+    <form class="filter-bar" method="get" action="/web/jobs">
+      <input type="text" name="search" placeholder="Search title/company..." value="{{ filters.search }}">
+      <select name="india">
+        <option value="">India?</option>
+        <option value="yes" {{ 'selected' if filters.india=='yes' else '' }}>Yes</option>
+        <option value="no" {{ 'selected' if filters.india=='no' else '' }}>No</option>
+        <option value="maybe" {{ 'selected' if filters.india=='maybe' else '' }}>Maybe</option>
+      </select>
+      <select name="source">
+        <option value="">All Sources</option>
+        <option value="remotive" {{ 'selected' if filters.source=='remotive' else '' }}>Remotive</option>
+        <option value="remoteok" {{ 'selected' if filters.source=='remoteok' else '' }}>RemoteOK</option>
+        <option value="arbeitnow" {{ 'selected' if filters.source=='arbeitnow' else '' }}>Arbeitnow</option>
+        <option value="jsearch" {{ 'selected' if filters.source=='jsearch' else '' }}>JSearch</option>
+      </select>
+      <input type="number" name="min_score" placeholder="Min score" value="{{ filters.min_score }}" style="width:100px">
+      <button type="submit" class="btn btn-small">Filter</button>
+    </form>
+  </div>
+
+  {% if jobs %}
+  <div class="jobs-list">
+    {% for job in jobs %}
+    <div class="job-card {{ 'is-new' if job.status=='new' else '' }}">
+      <div class="job-header">
+        <div class="job-title">{{ job.title }}</div>
+        <div class="job-score score-{{ 'high' if job.relevance_score >= 70 else 'mid' if job.relevance_score >= 40 else 'low' }}">
+          {{ job.relevance_score }}
+        </div>
+      </div>
+      <div class="job-meta">
+        <span>{{ job.company }}</span>
+        <span>{{ job.location }}</span>
+        <span class="india-badge india-{{ job.india_friendly }}">{{ job.india_friendly }}</span>
+        <span class="source-badge">{{ job.source }}</span>
+      </div>
+      {% if job.tech_stack %}
+      <div class="job-tech">
+        {% for tech in job.tech_stack.split(',')[:8] %}
+        <span class="tech-tag">{{ tech.strip() }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if job.location_note and job.location_note != 'No clear restriction' %}
+      <div class="job-note">{{ job.location_note }}</div>
+      {% endif %}
+      <div class="job-actions">
+        <a href="{{ job.url }}" target="_blank" class="btn btn-small">Apply</a>
+        <form method="post" action="/web/jobs/{{ job.id }}/status" style="display:inline">
+          <select name="status" onchange="this.form.submit()">
+            <option value="new" {{ 'selected' if job.status=='new' else '' }}>New</option>
+            <option value="applied">Applied</option>
+            <option value="interviewing">Interviewing</option>
+            <option value="rejected">Rejected</option>
+            <option value="stale">Stale</option>
+          </select>
+        </form>
+        <a href="/web/outreach?job_id={{ job.id }}" class="btn btn-small">Outreach</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="card">
+    <p>No jobs found. <a href="/web/collect" method="post">Run collection</a> or adjust filters.</p>
+  </div>
+  {% endif %}
+</main>
+</body>
+</html>

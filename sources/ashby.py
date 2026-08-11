@@ -1,7 +1,4 @@
-"""Ashby ATS — free public API, no auth needed.
-API: GET https://api.ashbyhq.com/posting-api/job-board/{slug}
-"""
-
+"""Ashby ATS — free public API, no auth needed."""
 import httpx
 from sources.base import BaseSource
 from core.models import Job
@@ -12,17 +9,22 @@ class AshbySource(BaseSource):
 
     def __init__(self, company: dict):
         self.company = company
-        self.slug = company["ats_slug"]
+        self.slug = company.get("ats_slug", "")
 
     async def fetch(self) -> list[Job]:
+        if not self.slug:
+            self.log("No Ashby slug, skipping")
+            return []
+
         url = f"https://api.ashbyhq.com/posting-api/job-board/{self.slug}"
 
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, params={"includeCompensation": "true"})
-            resp.raise_for_status()
             try:
+                resp = await client.get(url, params={"includeCompensation": "true"})
+                resp.raise_for_status()
                 data = resp.json()
-            except Exception:
+            except Exception as e:
+                self.log(f"HTTP error: {e}")
                 return []
 
         jobs = []
@@ -49,5 +51,8 @@ class AshbySource(BaseSource):
                 salary=salary,
                 company_domain=self.company.get("domain", ""),
             )
+            job.id = job.make_fingerprint()
             jobs.append(job)
+
+        self.log(f"Fetched {len(jobs)} jobs")
         return jobs

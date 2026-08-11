@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Job Hunter — Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard" class="{{ 'active' if page=='dashboard' else '' }}">Dashboard</a>
+  <a href="/web/jobs" class="{{ 'active' if page=='jobs' else '' }}">Jobs</a>
+  <a href="/web/profiles" class="{{ 'active' if page=='profiles' else '' }}">Profiles</a>
+  <a href="/web/resumes" class="{{ 'active' if page=='resumes' else '' }}">Resumes</a>
+  <a href="/web/companies" class="{{ 'active' if page=='companies' else '' }}">Companies</a>
+  <a href="/web/outreach" class="{{ 'active' if page=='outreach' else '' }}">Outreach</a>
+</nav>
+
+<main class="container">
+  <div class="page-header">
+    <h1>Dashboard</h1>
+    <div class="header-actions">
+      <form action="/web/collect" method="post" style="display:inline">
+        <button type="submit" class="btn btn-primary">Run Collection Now</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Stats row -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-value">{{ stats.total }}</div>
+      <div class="stat-label">Total Jobs</div>
+    </div>
+    <div class="stat-card highlight">
+      <div class="stat-value">{{ stats.new }}</div>
+      <div class="stat-label">New (unread)</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ jsearch.daily }}/18</div>
+      <div class="stat-label">JSearch Today</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ jsearch.monthly }}/180</div>
+      <div class="stat-label">JSearch This Month</div>
+    </div>
+  </div>
+
+  <!-- Active Profile -->
+  {% if active_profile %}
+  <div class="card">
+    <h2>Active Profile: {{ active_profile.name }}</h2>
+    <p class="muted">{{ active_profile.description }}</p>
+    <p><a href="/web/profiles/{{ active_profile.id }}/edit">Edit Profile →</a></p>
+  </div>
+  {% else %}
+  <div class="card warning">
+    <h2>No Active Profile</h2>
+    <p><a href="/web/profiles/new">Create one now →</a></p>
+  </div>
+  {% endif %}
+
+  <!-- Last runs -->
+  {% if last_runs %}
+  <div class="card">
+    <h2>Recent Collection Runs</h2>
+    <table class="table">
+      <thead><tr><th>Time</th><th>Source</th><th>Fetched</th><th>New</th><th>Updated</th><th>Filtered</th><th>JSearch</th></tr></thead>
+      <tbody>
+        {% for run in last_runs %}
+        <tr>
+          <td>{{ run.run_at[:16] }}</td>
+          <td>{{ run.source }}</td>
+          <td>{{ run.fetched }}</td>
+          <td>{{ run.new }}</td>
+          <td>{{ run.updated }}</td>
+          <td>{{ run.filtered_out }}</td>
+          <td>{{ run.jsearch_used }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- 7-day chart (text) -->
+  {% if stats.last_7_days %}
+  <div class="card">
+    <h2>Jobs Discovered (Last 7 Days)</h2>
+    <div class="bar-chart">
+      {% for day in stats.last_7_days %}
+      <div class="bar-row">
+        <span class="bar-label">{{ day.date[5:] }}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:{{ (day.count / stats.total * 100)|round(1) }}%"></div></div>
+        <span class="bar-count">{{ day.count }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Telegram status -->
+  <div class="card">
+    <h2>Telegram Integration</h2>
+    <p class="muted">Daily digest → <strong>Daily Updates thread (ID: {{ active_profile.config.get('outreach', {}).get('email_digest_subject_role', 'N/A') }})</strong></p>
+    <p class="muted">Use <code>/collect</code> or <code>/firecrawl URL</code> in Telegram to trigger manually.</p>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Outreach — Job Hunter</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard">Dashboard</a>
+  <a href="/web/jobs">Jobs</a>
+  <a href="/web/profiles">Profiles</a>
+  <a href="/web/resumes">Resumes</a>
+  <a href="/web/companies">Companies</a>
+  <a href="/web/outreach" class="active">Outreach</a>
+</nav>
+
+<main class="container">
+  <div class="page-header">
+    <h1>Outreach</h1>
+    <div class="header-actions">
+      <form method="get" action="/web/outreach" style="display:inline">
+        <select name="status" onchange="this.form.submit()">
+          <option value="">All</option>
+          <option value="pending" {{ 'selected' if filter_status=='pending' else '' }}>Pending</option>
+          <option value="messaged" {{ 'selected' if filter_status=='messaged' else '' }}>Messaged</option>
+          <option value="replied" {{ 'selected' if filter_status=='replied' else '' }}>Replied</option>
+          <option value="followed_up" {{ 'selected' if filter_status=='followed_up' else '' }}>Followed Up</option>
+        </select>
+      </form>
+    </div>
+  </div>
+
+  <!-- Outreach list -->
+  {% if outreach %}
+  <div class="outreach-list">
+    {% for o in outreach %}
+    <div class="card outreach-card">
+      <div class="outreach-header">
+        <div>
+          <strong>{{ o.job_title }}</strong> @ {{ o.company }}
+        </div>
+        <span class="status-badge status-{{ o.status }}">{{ o.status }}</span>
+      </div>
+      <div class="outreach-meta muted">
+        {{ o.contact_name }} {{ '| ' + o.contact_position if o.contact_position else '' }}
+        {% if o.contact_linkedin %}
+        | <a href="{{ o.contact_linkedin }}" target="_blank">LinkedIn</a>
+        {% endif %}
+      </div>
+      {% if o.dm_short %}
+      <div class="dm-preview">
+        <strong>Short DM:</strong>
+        <p>{{ o.dm_short[:200] }}{% if o.dm_short|length > 200 %}...{% endif %}</p>
+      </div>
+      {% endif %}
+      {% if o.dm_long %}
+      <details>
+        <summary class="muted">Full DM</summary>
+        <pre class="dm-full">{{ o.dm_long }}</pre>
+      </details>
+      {% endif %}
+      <div class="outreach-actions">
+        <form method="post" action="/web/outreach/{{ o.id }}/status" style="display:inline">
+          <select name="status" onchange="this.form.submit()">
+            <option value="pending" {{ 'selected' if o.status=='pending' else '' }}>Pending</option>
+            <option value="messaged" {{ 'selected' if o.status=='messaged' else '' }}>Messaged</option>
+            <option value="replied" {{ 'selected' if o.status=='replied' else '' }}>Replied</option>
+            <option value="followed_up" {{ 'selected' if o.status=='followed_up' else '' }}>Followed Up</option>
+            <option value="done" {{ 'selected' if o.status=='done' else '' }}>Done</option>
+          </select>
+        </form>
+        {% if o.contact_linkedin %}
+        <a href="{{ o.contact_linkedin }}" target="_blank" class="btn btn-small">Open LinkedIn</a>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="card">
+    <p>No outreach yet. Generate it from the <a href="/web/jobs">Jobs page</a>.</p>
+  </div>
+  {% endif %}
+
+  <!-- Firecrawl trigger -->
+  <div class="card">
+    <h2>Direct Firecrawl Scrape</h2>
+    <form method="post" action="/web/firecrawl">
+      <div class="form-row">
+        <div class="form-group" style="flex:2">
+          <label>Company Career Page URL *</label>
+          <input type="url" name="url" required placeholder="https://company.com/careers">
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>Company Name</label>
+          <input type="text" name="company_name" placeholder="Optional override">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">Scrape Now</button>
+    </form>
+  </div>
+</main>
+</body>
+</html>

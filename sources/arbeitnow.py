@@ -1,8 +1,6 @@
-"""Arbeitnow — fully free, no API key needed.
-Docs: https://arbeitnow.com/api
-"""
-
+"""Arbeitnow — fully free, no API key needed."""
 import httpx
+from datetime import datetime
 from sources.base import BaseSource
 from core.models import Job
 
@@ -13,21 +11,22 @@ class ArbeitnowSource(BaseSource):
 
     async def fetch(self) -> list[Job]:
         jobs = []
-
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(self.BASE_URL)
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = await client.get(self.BASE_URL)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                self.log(f"HTTP error: {e}")
+                return []
 
         for item in data.get("data", []):
-            tags = item.get("tags", [])
-            if isinstance(tags, list):
-                tags = ", ".join(tags)
-
             created = item.get("created_at", "")
             if isinstance(created, int):
-                from datetime import datetime
                 created = datetime.utcfromtimestamp(created).isoformat()
+
+            tags = item.get("tags", [])
+            tags_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
 
             job = Job(
                 title=item.get("title", ""),
@@ -37,9 +36,11 @@ class ArbeitnowSource(BaseSource):
                 url=item.get("url", ""),
                 source=self.name,
                 posted_date=str(created),
-                job_type="full-time" if item.get("remote", False) else "on-site",
-                tech_stack=tags if isinstance(tags, str) else "",
+                job_type="full-time" if item.get("remote") else "on-site",
+                tech_stack=tags_str,
             )
+            job.id = job.make_fingerprint()
             jobs.append(job)
 
+        self.log(f"Fetched {len(jobs)} jobs")
         return jobs
