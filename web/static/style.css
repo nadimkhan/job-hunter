@@ -148,6 +148,17 @@ h3 { font-size: 1rem; margin-bottom: 0.4rem; }
 
 .btn:not(a) { text-decoration: none; }
 
+.btn-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    padding: 0;
+    font-size: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+}
+.btn-link:hover { color: var(--accent-hover); }
+
 form[style="display:inline"], .form-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* ── Cards ───────────────────────────────────────────────────── */
