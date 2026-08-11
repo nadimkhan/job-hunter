@@ -1,12 +1,13 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Paths
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "jobs.db"))
-RESUME_DIR = os.getenv("RESUME_DIR", os.path.join(BASE_DIR, "resumes"))
+# Paths — use Path so / operator works downstream
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "jobs.db"))
+RESUME_DIR = os.getenv("RESUME_DIR", str(BASE_DIR / "resumes"))
 
 # API Keys
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
