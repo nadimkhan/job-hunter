@@ -520,6 +520,15 @@ async def generate_outreach_web(job_id: str, profile_id: int = Form(0)):
 
     db = await aiosqlite.connect(DB_PATH)
     await init_db()
+
+    # Check for existing outreach for this job
+    existing = await db.execute(
+        "SELECT id FROM outreach WHERE job_id = ? LIMIT 1", (job_id,)
+    )
+    if await existing.fetchone():
+        await db.close()
+        return RedirectResponse(url="/web/outreach?status=pending", status_code=303)
+
     await insert_outreach(db, {
         "job_id": job_id,
         "job_title": job.get("title", ""),
@@ -532,7 +541,7 @@ async def generate_outreach_web(job_id: str, profile_id: int = Form(0)):
         "profile_id": profile.get("id", 0),
     })
     await db.close()
-    return RedirectResponse(url="/web/outreach", status_code=303)
+    return RedirectResponse(url="/web/outreach?status=pending", status_code=303)
 
 
 @app.post("/web/outreach/{outreach_id}/status")
