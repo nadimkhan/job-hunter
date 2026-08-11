@@ -545,7 +545,7 @@ async def generate_outreach_web(job_id: str, profile_id: int = Form(0)):
     )
     if await existing.fetchone():
         await db.close()
-        return RedirectResponse(url="/web/outreach?status=pending", status_code=303)
+        return RedirectResponse(url=f"/web/outreach?job_id={job_id}", status_code=303)
 
     await insert_outreach(db, {
         "job_id": job_id,
@@ -559,7 +559,7 @@ async def generate_outreach_web(job_id: str, profile_id: int = Form(0)):
         "profile_id": profile.get("id", 0),
     })
     await db.close()
-    return RedirectResponse(url="/web/outreach?status=pending", status_code=303)
+    return RedirectResponse(url=f"/web/outreach?job_id={job_id}", status_code=303)
 
 
 @app.post("/web/outreach/{outreach_id}/status")
