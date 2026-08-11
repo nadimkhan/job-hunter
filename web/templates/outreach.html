@@ -24,12 +24,28 @@
         <select name="status" onchange="this.form.submit()">
           <option value="">All</option>
           <option value="pending" {{ 'selected' if filter_status=='pending' else '' }}>Pending</option>
+          <option value="applied" {{ 'selected' if filter_status=='applied' else '' }}>Applied</option>
           <option value="messaged" {{ 'selected' if filter_status=='messaged' else '' }}>Messaged</option>
           <option value="replied" {{ 'selected' if filter_status=='replied' else '' }}>Replied</option>
           <option value="followed_up" {{ 'selected' if filter_status=='followed_up' else '' }}>Followed Up</option>
+          <option value="done" {{ 'selected' if filter_status=='done' else '' }}>Done</option>
         </select>
       </form>
     </div>
+  </div>
+
+  <!-- What is Outreach -->
+  <div class="card">
+    <h2>What is Outreach?</h2>
+    <p>Outreach generates LinkedIn search URLs and DM templates for a job. It does NOT send messages automatically — it helps you find the right recruiter and craft a message manually.</p>
+    <p><strong>How it works:</strong></p>
+    <ol style="line-height:1.7">
+      <li>Click <strong>Outreach</strong> on any job card in the Jobs page</li>
+      <li>System generates a LinkedIn search URL for the company + relevant role titles</li>
+      <li>System drafts a personalized DM template based on your profile config</li>
+      <li>You open LinkedIn, find the right person, and send the message yourself</li>
+    </ol>
+    <p class="muted" style="font-size:13px"><strong>Note:</strong> LinkedIn requires login to view people. The search URL opens LinkedIn where you can manually find contacts. DMs are drafts — edit before sending.</p>
   </div>
 
   <!-- Outreach list -->
@@ -52,7 +68,7 @@
       {% if o.dm_short %}
       <div class="dm-preview">
         <strong>Short DM:</strong>
-        <p>{{ o.dm_short[:200] }}{% if o.dm_short|length > 200 %}...{% endif %}</p>
+        <p>{{ o.dm_short[:300] }}{% if o.dm_short|length > 300 %}...{% endif %}</p>
       </div>
       {% endif %}
       {% if o.dm_long %}
@@ -61,10 +77,16 @@
         <pre class="dm-full">{{ o.dm_long }}</pre>
       </details>
       {% endif %}
+      {% if o.notes and o.notes != '[]' %}
+      <div class="outreach-notes">
+        <strong>Notes:</strong> {{ o.notes }}
+      </div>
+      {% endif %}
       <div class="outreach-actions">
         <form method="post" action="/web/outreach/{{ o.id }}/status" style="display:inline">
-          <select name="status" onchange="this.form.submit()">
+          <select name="status" onchange="this.form.submit()" class="status-select">
             <option value="pending" {{ 'selected' if o.status=='pending' else '' }}>Pending</option>
+            <option value="applied" {{ 'selected' if o.status=='applied' else '' }}>Applied</option>
             <option value="messaged" {{ 'selected' if o.status=='messaged' else '' }}>Messaged</option>
             <option value="replied" {{ 'selected' if o.status=='replied' else '' }}>Replied</option>
             <option value="followed_up" {{ 'selected' if o.status=='followed_up' else '' }}>Followed Up</option>
@@ -80,13 +102,14 @@
   </div>
   {% else %}
   <div class="card">
-    <p>No outreach yet. Generate it from the <a href="/web/jobs">Jobs page</a>.</p>
+    <p>No outreach yet. Go to <a href="/web/jobs">Jobs</a> and click <strong>Outreach</strong> on any job card to generate LinkedIn search + DM template.</p>
   </div>
   {% endif %}
 
-  <!-- Firecrawl trigger -->
+  <!-- Direct Firecrawl -->
   <div class="card">
     <h2>Direct Firecrawl Scrape</h2>
+    <p>Manually scrape a company career page to find unlisted or new positions.</p>
     <form method="post" action="/web/firecrawl">
       <div class="form-row">
         <div class="form-group" style="flex:2">
@@ -102,5 +125,19 @@
     </form>
   </div>
 </main>
+
+<style>
+.status-select { padding: 3px 8px; border-radius: 4px; font-size: 12px; }
+.outreach-card { margin-bottom: 12px; }
+.outreach-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+.outreach-meta { font-size: 13px; margin-bottom: 8px; }
+.outreach-notes { font-size: 13px; margin: 6px 0; color: var(--text-secondary); }
+.dm-preview { background: var(--bg-secondary, #1a1a2e); border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
+.dm-preview p { margin: 4px 0 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+.dm-full { white-space: pre-wrap; font-size: 13px; line-height: 1.5; padding: 10px; background: var(--bg-secondary, #1a1a2e); border-radius: 4px; overflow-x: auto; }
+.outreach-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+details { margin-top: 8px; }
+summary { cursor: pointer; font-size: 13px; padding: 4px 0; }
+</style>
 </body>
 </html>

@@ -646,7 +646,37 @@ async def api_jobs(source: str = None, status: str = None,
     return {"count": len(jobs), "jobs": jobs}
 
 
-# ── CLI-mode runner ───────────────────────────────────────
+@app.post("/api/jobs/bulk-delete")
+async def bulk_delete_jobs(job_ids: list[str]):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    deleted = 0
+    for job_id in job_ids:
+        cur = await db.execute("SELECT id FROM jobs WHERE id = ?", (job_id,))
+        if await cur.fetchone():
+            await db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            deleted += 1
+    await db.commit()
+    await db.close()
+    return {"deleted": deleted}
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    cur = await db.execute("SELECT id FROM jobs WHERE id = ?", (job_id,))
+    row = await cur.fetchone()
+    if not row:
+        await db.close()
+        raise HTTPException(status_code=404, detail="Job not found")
+    await db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    await db.commit()
+    await db.close()
+    return {"deleted": job_id}
+
+
+# ── CLI-mode runner ────────────────────────────────────────
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument("--web-only", action="store_true")

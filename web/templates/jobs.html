@@ -18,9 +18,17 @@
 
 <main class="container">
   <div class="page-header">
-    <h1>Jobs ({{ jobs|length }})</h1>
+    <h1>Jobs (<span id="job-count">{{ jobs|length }}</span>)</h1>
     <form class="filter-bar" method="get" action="/web/jobs">
       <input type="text" name="search" placeholder="Search title/company..." value="{{ filters.search }}">
+      <select name="status">
+        <option value="">Status: All</option>
+        <option value="new" {{ 'selected' if filters.status=='new' else '' }}>New</option>
+        <option value="applied" {{ 'selected' if filters.status=='applied' else '' }}>Applied</option>
+        <option value="interviewing" {{ 'selected' if filters.status=='interviewing' else '' }}>Interviewing</option>
+        <option value="rejected" {{ 'selected' if filters.status=='rejected' else '' }}>Rejected</option>
+        <option value="stale" {{ 'selected' if filters.status=='stale' else '' }}>Stale</option>
+      </select>
       <select name="india">
         <option value="">India?</option>
         <option value="yes" {{ 'selected' if filters.india=='yes' else '' }}>Yes</option>
@@ -32,7 +40,9 @@
         <option value="remotive" {{ 'selected' if filters.source=='remotive' else '' }}>Remotive</option>
         <option value="remoteok" {{ 'selected' if filters.source=='remoteok' else '' }}>RemoteOK</option>
         <option value="arbeitnow" {{ 'selected' if filters.source=='arbeitnow' else '' }}>Arbeitnow</option>
-        <option value="jsearch" {{ 'selected' if filters.source=='jsearch' else '' }}>JSearch</option>
+        <option value="websearch" {{ 'selected' if filters.source=='websearch' else '' }}>Web Search</option>
+        <option value="web3career" {{ 'selected' if filters.source=='web3career' else '' }}>Web3Career</option>
+        <option value="cryptocurrencyjobs" {{ 'selected' if filters.source=='cryptocurrencyjobs' else '' }}>CryptoJobsList</option>
       </select>
       <input type="number" name="min_score" placeholder="Min score" value="{{ filters.min_score }}" style="width:100px">
       <button type="submit" class="btn btn-small">Filter</button>
@@ -40,10 +50,21 @@
   </div>
 
   {% if jobs %}
+  <!-- Bulk actions bar -->
+  <div class="bulk-actions" id="bulk-bar" style="display:none">
+    <span id="selected-count">0</span> selected
+    <button class="btn btn-small btn-warn" onclick="markSelected('applied')">Mark Applied</button>
+    <button class="btn btn-small" onclick="markSelected('new')">Mark New</button>
+    <button class="btn btn-small btn-danger" onclick="deleteSelected()">Delete</button>
+  </div>
+
   <div class="jobs-list">
     {% for job in jobs %}
-    <div class="job-card {{ 'is-new' if job.status=='new' else '' }}">
+    <div class="job-card {{ 'is-applied' if job.status=='applied' else 'is-new' if job.status=='new' else '' }}">
       <div class="job-header">
+        <div class="job-checkbox">
+          <input type="checkbox" class="job-select" value="{{ job.id }}" onchange="updateBulkBar()">
+        </div>
         <div class="job-title">{{ job.title }}</div>
         <div class="job-score score-{{ 'high' if job.relevance_score >= 70 else 'mid' if job.relevance_score >= 40 else 'low' }}">
           {{ job.relevance_score }}
@@ -54,6 +75,9 @@
         <span>{{ job.location }}</span>
         <span class="india-badge india-{{ job.india_friendly }}">{{ job.india_friendly }}</span>
         <span class="source-badge">{{ job.source }}</span>
+        {% if job.status != 'new' %}
+        <span class="status-badge status-{{ job.status }}">{{ job.status }}</span>
+        {% endif %}
       </div>
       {% if job.tech_stack %}
       <div class="job-tech">
@@ -68,15 +92,17 @@
       <div class="job-actions">
         <a href="{{ job.url }}" target="_blank" class="btn btn-small">Apply</a>
         <form method="post" action="/web/jobs/{{ job.id }}/status" style="display:inline">
-          <select name="status" onchange="this.form.submit()">
+          <select name="status" onchange="this.form.submit()" class="status-select">
             <option value="new" {{ 'selected' if job.status=='new' else '' }}>New</option>
-            <option value="applied">Applied</option>
-            <option value="interviewing">Interviewing</option>
-            <option value="rejected">Rejected</option>
-            <option value="stale">Stale</option>
+            <option value="applied" {{ 'selected' if job.status=='applied' else '' }}>Applied</option>
+            <option value="interviewing" {{ 'selected' if job.status=='interviewing' else '' }}>Interviewing</option>
+            <option value="rejected" {{ 'selected' if job.status=='rejected' else '' }}>Rejected</option>
+            <option value="stale" {{ 'selected' if job.status=='stale' else '' }}>Stale</option>
+            <option value="archived">Archived</option>
           </select>
         </form>
         <a href="/web/outreach?job_id={{ job.id }}" class="btn btn-small">Outreach</a>
+        <button class="btn btn-small btn-danger" onclick="deleteJob('{{ job.id }}')">Delete</button>
       </div>
     </div>
     {% endfor %}
@@ -87,5 +113,69 @@
   </div>
   {% endif %}
 </main>
+
+<script>
+function updateBulkBar() {
+  const checked = document.querySelectorAll('.job-select:checked');
+  const bar = document.getElementById('bulk-bar');
+  const count = document.getElementById('selected-count');
+  count.textContent = checked.length;
+  bar.style.display = checked.length > 0 ? 'flex' : 'none';
+}
+
+async function deleteJob(jobId) {
+  if (!confirm('Delete this job?')) return;
+  const r = await fetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
+  if (r.ok) location.reload();
+  else alert('Delete failed: ' + (await r.text()));
+}
+
+async function deleteSelected() {
+  const ids = [...document.querySelectorAll('.job-select:checked')].map(c => c.value);
+  if (!ids.length || !confirm(`Delete ${ids.length} job(s)?`)) return;
+  const r = await fetch('/api/jobs/bulk-delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(ids)
+  });
+  if (r.ok) location.reload();
+  else alert('Delete failed: ' + (await r.text()));
+}
+
+async function markSelected(status) {
+  const ids = [...document.querySelectorAll('.job-select:checked')].map(c => c.value);
+  if (!ids.length) return;
+  // Update each job's status via form submission (POST to individual status endpoint)
+  // Use Promise.all for parallel updates
+  await Promise.all(ids.map(id => {
+    return fetch(`/web/jobs/${id}/status`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: `status=${status}`
+    });
+  }));
+  location.reload();
+}
+</script>
+
+<style>
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-secondary, #1e1e2e);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+.job-card.is-applied { opacity: 0.7; border-left: 3px solid #22c55e; }
+.job-header { display: flex; align-items: center; gap: 8px; }
+.job-checkbox { flex-shrink: 0; }
+.job-title { flex: 1; font-weight: 600; }
+.status-select { padding: 3px 6px; border-radius: 4px; font-size: 12px; }
+.btn-warn { background: #f59e0b; color: #000; }
+.btn-danger { background: #ef4444; color: #fff; }
+</style>
 </body>
 </html>
