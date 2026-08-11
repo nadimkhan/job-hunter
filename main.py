@@ -479,10 +479,27 @@ async def add_company_web(request: Request,
 
 # ── Outreach ───────────────────────────────────────────────
 @app.get("/web/outreach", response_class=HTMLResponse)
-async def outreach_page(request: Request, status: str = None):
+async def outreach_page(request: Request, status: str = None, job_id: str = None):
     db = await aiosqlite.connect(DB_PATH)
     await init_db()
+
+    # If job_id provided, show outreach for that specific job
+    target_job = None
+    if job_id:
+        cur = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
+        row = await cur.fetchone()
+        if row:
+            cols = [d[0] for d in cur.description]
+            target_job = dict(zip(cols, row))
+
     outreach = await get_outreach(db, status=status)
+    # Filter to just the target job's outreach if job_id was passed
+    if job_id and target_job:
+        outreach = [o for o in outreach if o.get("job_id") == job_id]
+        if not outreach:
+            # No outreach yet for this job — show a generate prompt
+            outreach = []
+
     jobs_cursor = await db.execute(
         "SELECT id, title, company FROM jobs ORDER BY discovered_at DESC LIMIT 200"
     )
@@ -490,7 +507,8 @@ async def outreach_page(request: Request, status: str = None):
             for r in await jobs_cursor.fetchall()]
     await db.close()
     return render("outreach.html", request, page="outreach",
-                  outreach=outreach, jobs=jobs, filter_status=status or "")
+                  outreach=outreach, jobs=jobs, filter_status=status or "",
+                  target_job=target_job)
 
 
 @app.post("/web/outreach/generate/{job_id}")
