@@ -546,8 +546,12 @@ async def update_outreach_web(outreach_id: int, status: str = Form(...)):
 
 # ── Collect (manual trigger) ──────────────────────────────
 @app.get("/web/collect")
-async def trigger_collect_redirect():
-    return RedirectResponse(url="/web/dashboard", status_code=303)
+async def trigger_collect_page(request: Request):
+    db = await aiosqlite.connect(DB_PATH)
+    await init_db()
+    stats = await get_stats(db)
+    await db.close()
+    return render("collect.html", request, page="collect", stats=stats)
 
 @app.post("/web/collect")
 async def trigger_collect_web(request: Request):

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Collect Jobs</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/web/dashboard">Dashboard</a>
+  <a href="/web/jobs">Jobs</a>
+  <a href="/web/profiles">Profiles</a>
+  <a href="/web/resumes">Resumes</a>
+  <a href="/web/companies">Companies</a>
+  <a href="/web/outreach">Outreach</a>
+</nav>
+
+<main class="container">
+  <div class="page-header">
+    <h1>Collect Jobs</h1>
+    <p class="subtitle">Search the internet + job boards for fresh blockchain/web3 opportunities</p>
+  </div>
+
+  <!-- Sources Overview -->
+  <div class="card">
+    <h2>Active Sources</h2>
+    <div class="source-grid">
+      <div class="source-item">
+        <span class="source-icon">🔍</span>
+        <div>
+          <strong>Web Search</strong>
+          <p>Firecrawl search API — internet-wide job discovery</p>
+        </div>
+      </div>
+      <div class="source-item">
+        <span class="source-icon">🌐</span>
+        <div>
+          <strong>web3.career</strong>
+          <p>Blockchain jobs board (scraped via Firecrawl)</p>
+        </div>
+      </div>
+      <div class="source-item">
+        <span class="source-icon">💰</span>
+        <div>
+          <strong>cryptocurrencyjobs.co</strong>
+          <p>Web3 jobs board (scraped via Firecrawl)</p>
+        </div>
+      </div>
+      <div class="source-item">
+        <span class="source-icon">🔄</span>
+        <div>
+          <strong>Remotive + RemoteOK + Arbeitnow</strong>
+          <p>Free job board APIs</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Run Collection -->
+  <div class="card">
+    <h2>Run Collection</h2>
+    <p>Queries the active profile's keywords across all sources above.</p>
+    <form action="/web/collect" method="post">
+      <button type="submit" class="btn btn-primary btn-lg">Run Collection Now</button>
+    </form>
+    <p class="hint">Takes ~30-60 seconds. Results appear in Jobs after completion.</p>
+  </div>
+
+  <!-- Current Stats -->
+  <div class="card">
+    <h2>Current Stats</h2>
+    <table class="table">
+      <tr><td>Total Jobs Stored</td><td><strong>{{ stats.total_jobs }}</strong></td></tr>
+      <tr><td>New (Unread)</td><td><strong>{{ stats.new_jobs }}</strong></td></tr>
+      <tr><td>Applied</td><td><strong>{{ stats.applied_jobs }}</strong></td></tr>
+      <tr><td>Archived</td><td><strong>{{ stats.archived_jobs }}</strong></td></tr>
+      <tr><td>Score Threshold</td><td><strong>15+</strong></td></tr>
+    </table>
+    <div class="form-actions">
+      <a href="/web/jobs" class="btn">View Jobs →</a>
+    </div>
+  </div>
+
+  <!-- JSearch Note -->
+  <div class="card card-warn">
+    <h2>Note on JSearch</h2>
+    <p>JSearch (RapidAPI) is currently unavailable — returning 404 on all requests. This is a known issue with the RapidAPI endpoint. The system falls back to Web Search + blockchain job boards automatically.</p>
+  </div>
+</main>
+
+<style>
+.source-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.source-item { display: flex; gap: 12px; align-items: flex-start; padding: 10px; background: var(--bg-secondary); border-radius: 6px; }
+.source-icon { font-size: 20px; flex-shrink: 0; }
+.source-item p { margin: 2px 0 0; font-size: 12px; color: var(--text-secondary); }
+.subtitle { color: var(--text-secondary); margin-top: 4px; }
+.btn-lg { padding: 12px 28px; font-size: 16px; }
+.hint { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+.card-warn { border-left: 3px solid var(--warn-color, #f59e0b); }
+@media (max-width: 600px) {
+  .source-grid { grid-template-columns: 1fr; }
+}
+</style>
+</body>
+</html>
