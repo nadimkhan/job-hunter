@@ -8,6 +8,7 @@ from config.settings import RAPIDAPI_KEY
 
 # These are injected at runtime by collector
 _global_usage = {"daily": 0, "monthly": 0}
+MAX_JSEARCH_PER_RUN = 3   # hard cap enforced per run
 _daily_limit = 18      # max JSearch calls per day
 _monthly_limit = 180   # max per month (stay under 200 free tier)
 
