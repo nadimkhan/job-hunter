@@ -17,6 +17,7 @@ from sources.greenhouse import GreenhouseSource
 from sources.lever import LeverSource
 from sources.ashby import AshbySource
 from sources.firecrawl_scraper import FirecrawlSource
+from sources.websearch import WebSearchSource
 
 
 COMPANY_CRAWL_CONCURRENCY = 5
@@ -33,6 +34,8 @@ async def _score_and_store(jobs: list, profile_config: dict, stats: dict, db):
         result = score_job(job.title, job.description, job.location, profile_config=profile_config)
         if result["score"] < min_store:
             stats["filtered_out"] += 1
+            if stats["filtered_out"] <= 3:
+                log(f"  FILTERED [{result['score']}] {job.title[:50]}")
             continue
 
         job.relevance_score = result["score"]
@@ -55,7 +58,8 @@ async def _score_and_store(jobs: list, profile_config: dict, stats: dict, db):
             result_status = await insert_job(db, job_dict)
             if result_status == "inserted":
                 stats["new"] += 1
-            else:
+                log(f"  NEW JOB [{result['score']}] {job.title[:60]}")
+            elif result_status == "updated":
                 stats["updated"] += 1
         except Exception as e:
             log(f"DB error storing job: {e}")
@@ -94,6 +98,28 @@ async def _fetch_from_source(source) -> list:
         return []
 
 
+async def _scrape_job_boards(profile_config: dict) -> list:
+    """Scrape blockchain job board listing pages via Firecrawl.
+    These are the most reliable source of actual blockchain/web3 jobs."""
+    boards = [
+        {"url": "https://web3.career/blockchain-jobs", "name": "Web3Career"},
+        {"url": "https://web3.career/solidity-jobs", "name": "Web3Career"},
+        {"url": "https://web3.career/remote-jobs", "name": "Web3Career"},
+        {"url": "https://cryptocurrencyjobs.co/web3/", "name": "CryptoJobsList"},
+        {"url": "https://cryptocurrencyjobs.co/remote/", "name": "CryptoJobsList"},
+    ]
+    jobs = []
+    for board in boards:
+        try:
+            src = FirecrawlSource(url=board["url"], company_name=board["name"])
+            board_jobs = await src.fetch()
+            jobs.extend(board_jobs)
+            log(f"  [OK] {board['name']}: {len(board_jobs)} jobs from {board['url']}")
+        except Exception as e:
+            log(f"  [FAIL] {board['name']}: {e}")
+    return jobs
+
+
 async def run_job_boards(profile_config: dict, db) -> dict:
     _load_jsearch_usage()
 
@@ -101,6 +127,7 @@ async def run_job_boards(profile_config: dict, db) -> dict:
         RemotiveSource(),
         RemoteOKSource(),
         ArbeitnowSource(),
+        WebSearchSource(),
     ]
 
     jsearch_queries = profile_config.get("search", {}).get("jsearch_default_queries", [])
@@ -108,7 +135,9 @@ async def run_job_boards(profile_config: dict, db) -> dict:
         sources.append(JSearchSource(queries=jsearch_queries))
 
     tasks = [_fetch_from_source(src) for src in sources]
+    board_task = _scrape_job_boards(profile_config)
     results = await asyncio.gather(*tasks)
+    board_jobs = await board_task
 
     all_jobs = []
     jsearch_count = 0
@@ -116,6 +145,7 @@ async def run_job_boards(profile_config: dict, db) -> dict:
         if src.name == "jsearch":
             jsearch_count = len(jobs)
         all_jobs.extend(jobs)
+    all_jobs.extend(board_jobs)
 
     stats = {"fetched": len(all_jobs), "new": 0, "updated": 0, "filtered_out": 0, "jsearch_used": jsearch_count}
     await _score_and_store(all_jobs, profile_config, stats, db)

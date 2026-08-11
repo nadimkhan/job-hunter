@@ -46,11 +46,12 @@ class FirecrawlSource(BaseSource):
                     return []
 
                 data = resp.json()
-                if data.get("status") != "success":
+                if not data.get("success"):
                     self.log(f"Scrape status: {data.get('status')}")
                     return []
 
-                markdown = data.get("data", {}).get("markdown", "")
+                page_data = data.get("data", {})
+                markdown = page_data.get("markdown") or page_data.get("content") or ""
                 if not markdown:
                     self.log("No markdown content extracted")
                     return []
@@ -67,67 +68,122 @@ class FirecrawlSource(BaseSource):
 
     def _parse_jobs(self, markdown: str) -> list[Job]:
         """Parse job listings from markdown content.
-        Looks for patterns like: Job Title | Company | Location | URL"""
-        import re, json
+        Handles formats from web3.career, cryptocurrencyjobs.co, and generic listings.
+        """
+        import re
 
         jobs = []
         lines = markdown.split("\n")
         seen = set()
 
-        for i, line in enumerate(lines):
+        for line in lines:
             line = line.strip()
             if not line or len(line) < 5:
                 continue
 
-            # Skip headers
+            # Skip headers, empty lines, non-job lines
             if re.match(r"^#{1,6}\s", line):
                 continue
-            if re.match(r"^\*\*.*\*\*$", line):  # bold-only lines
+            if re.match(r"^\*\*.*\*\*$", line):
+                continue
+            if re.match(r"^\|?\s*\[.*\]\(https?://\*(?:web3|crypto|blockchain)", line):
                 continue
 
-            # Look for URL in line (common in job listings)
-            urls = re.findall(r"https?://[^\s\)>\]\"\'\,]+", line)
-            url: str = ""
-            for u in urls:
-                skip_domains = ["firecrawl", "linkedin.com/company", "twitter.com", "github.com"]
-                if not any(s in u for s in skip_domains):
-                    url = u
+            url = ""
+            title = ""
+
+            # Format 1: | [**Job Title**](https://...) or [**Job Title**](https://...)
+            # web3.career uses: | [**Senior Engineer**](url)
+            for pattern in [
+                r'\[\*\*([^\]]+)\*\*\]\((https?://[^\)]+)\)',
+                r'\[([^\]]+)\]\((https?://[^\)]+)\)',
+            ]:
+                m = re.search(pattern, line)
+                if m:
+                    title = m.group(1).strip()
+                    url = m.group(2).strip()
                     break
 
-            # Try to extract title — lines with job-like keywords
-            job_keywords = ["engineer", "developer", "manager", "lead", "analyst",
-                            "designer", "writer", "specialist", "director", "architect",
-                            "content", "creator", "blockchain", "web3", "defi", "nft"]
-            line_lower = line.lower()
-            has_keyword = any(kw in line_lower for kw in job_keywords)
+            # Format 2: ## [Job Title](url)  — cryptocurrencyjobs.co
+            if not title:
+                m = re.search(r'##\s+\[([^\]]+)\]\((https?://[^\)]+)\)', line)
+                if m:
+                    title = m.group(1).strip()
+                    url = m.group(2).strip()
 
-            if has_keyword or url:
-                # Clean title: remove markdown links, pipes, etc.
-                title = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", line)
-                title = re.sub(r"\|.*", "", title)
-                title = re.sub(r"\*\*([^\*]+)\*\*", r"\1", title)
-                title = title.strip(" *-:")
-                if len(title) < 5 or len(title) > 200:
-                    continue
+            if not title and not url:
+                continue
 
-                fingerprint = f"{self.company_name.lower().strip()}|{title.lower().strip()}|remote"
-                fid = hash(fingerprint) % (10**12)
-                fingerprint = f"{fid:012x}"
+            # Skip non-job links
+            skip_domains = ["firecrawl", "linkedin.com/company", "twitter.com",
+                            "github.com", "facebook.com", "instagram.com"]
+            if url and any(s in url for s in skip_domains):
+                continue
 
-                if fingerprint in seen:
-                    continue
-                seen.add(fingerprint)
+            # Skip navigation/meta links
+            skip_keywords = ["sign in", "sign up", "register", "login", "create profile",
+                             "post a job", "pricing", "about", "blog", "home"]
+            if any(kw in line.lower() for kw in skip_keywords):
+                continue
 
-                job = Job(
-                    title=title,
-                    company=self.company_name,
-                    location="Remote",
-                    description=line,
-                    url=url,
-                    source=f"firecrawl:{self.company_name}",
-                    company_domain=self.company_name.lower().replace(" ", "") + ".com",
-                )
-                job.id = fingerprint
-                jobs.append(job)
+            # Clean title
+            title = re.sub(r'\*\*([^\*]+)\*\*', r'\1', title)
+            title = re.sub(r'\*\*', '', title)
+            title = title.strip(" *-:|")
+            title = re.sub(r'\s+', ' ', title)
+
+            if len(title) < 3 or len(title) > 200:
+                continue
+
+            fingerprint = f"{self.company_name.lower().strip()}|{title.lower().strip()}|{url}"
+            fid = hash(fingerprint) % (10**12)
+            fingerprint = f"{fid:012x}"
+
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+
+            # Try to extract company from title or URL
+            company = self.company_name
+            if not company or company == "Unknown":
+                company = self._extract_company_from_url(url) or self._extract_company_from_title(title)
+
+            job = Job(
+                title=title,
+                company=company,
+                location="Remote",
+                description=line[:500],
+                url=url,
+                source=f"firecrawl:{url}",
+                company_domain=self._extract_domain(url),
+            )
+            job.id = fingerprint
+            jobs.append(job)
 
         return jobs
+
+    def _extract_company_from_url(self, url: str) -> str:
+        if not url:
+            return ""
+        import re
+        host = re.sub(r"^https?://(www\.)?", "", url.split("/")[2] if "/" in url else url)
+        host = re.sub(r"\.(com|org|io|co|net|dev).*$", "", host, flags=re.IGNORECASE)
+        return host.replace("-", " ").replace("_", " ").title().strip()
+
+    def _extract_company_from_title(self, title: str) -> str:
+        # Format: "Job Title at Company" or "Company — Job Title"
+        import re
+        m = re.search(r'\bat\s+(\w+)', title, re.IGNORECASE)
+        if m:
+            return m.group(1).title()
+        m = re.search(r'(\w+)\s*[—-]\s*.+', title)
+        if m:
+            return m.group(1).title()
+        return ""
+
+    def _extract_domain(self, url: str) -> str:
+        if not url:
+            return ""
+        import re
+        m = re.search(r'https?://(?:www\.)?([^\s/]+)', url)
+        return m.group(1) if m else ""
