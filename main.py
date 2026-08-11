@@ -511,7 +511,7 @@ async def outreach_page(request: Request, status: str = None, job_id: str = None
                   target_job=target_job)
 
 
-@app.post("/web/outreach/generate/{job_id}")
+@app.post("/web/outreach/action/generate/{job_id}")
 async def generate_outreach_web(job_id: str, profile_id: int = Form(0)):
     db = await aiosqlite.connect(DB_PATH)
     await init_db()

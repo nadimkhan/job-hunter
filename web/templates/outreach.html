@@ -100,17 +100,19 @@
     </div>
     {% endfor %}
   </div>
-  {% if target_job and not outreach %}
-  <!-- No outreach yet for this specific job -->
+
+  {% elif target_job and not outreach %}
+  <!-- Targeted job with no outreach yet — show inline generate prompt -->
   <div class="card">
     <h2>No outreach for this job yet</h2>
     <p><strong>{{ target_job.title }}</strong> @ <strong>{{ target_job.company }}</strong></p>
     <p>Generate LinkedIn search URLs and a personalized DM template for this role.</p>
-    <form method="post" action="/web/outreach/generate/{{ target_job.id }}">
+    <form method="post" action="/web/outreach/action/generate/{{ target_job.id }}">
       <button type="submit" class="btn btn-primary">Generate Outreach</button>
     </form>
   </div>
-  {% elif not outreach %}
+
+  {% else %}
   <div class="card">
     <p>No outreach yet. Go to <a href="/web/jobs">Jobs</a> and click <strong>Outreach</strong> on any job card to generate LinkedIn search + DM template.</p>
     <p style="margin-top:8px;font-size:13px" class="muted">After generating, you'll see it here with a LinkedIn search link and a draft DM to personalize and send manually.</p>
