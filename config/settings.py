@@ -7,7 +7,7 @@ load_dotenv()
 # Paths — use Path so / operator works downstream
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "jobs.db"))
-RESUME_DIR = os.getenv("RESUME_DIR", str(BASE_DIR / "resumes"))
+RESUME_DIR = Path(os.getenv("RESUME_DIR", BASE_DIR / "resumes"))
 
 # API Keys
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
@@ -37,4 +37,4 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-in-production")
 
 # Ensure dirs exist
 os.makedirs(RESUME_DIR, exist_ok=True)
-os.makedirs(os.path.join(RESUME_DIR, "default"), exist_ok=True)
+os.makedirs(RESUME_DIR / "default", exist_ok=True)

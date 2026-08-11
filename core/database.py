@@ -304,9 +304,22 @@ async def insert_job(db, job_dict: dict) -> str:
             job_dict.get("india_friendly"), job_dict.get("location_note"),
             job_dict.get("resume_id"),
         ))
+        await db.commit()
         return "inserted"
     except Exception as e:
         if "UNIQUE" in str(e):
+            await db.execute("""
+                UPDATE jobs SET relevance_score=?, status='new', discovered_at=?,
+                tech_stack=?, india_friendly=?, location_note=?, experience_level=?,
+                resume_id=?
+                WHERE id=?
+            """, (
+                job_dict.get("relevance_score"), job_dict.get("discovered_at"),
+                job_dict.get("tech_stack"), job_dict.get("india_friendly"),
+                job_dict.get("location_note"), job_dict.get("experience_level"),
+                job_dict.get("resume_id"), job_dict.get("id"),
+            ))
+            await db.commit()
             return "updated"
         return f"error: {e}"
 

@@ -27,7 +27,7 @@ def log(msg):
     print(f"[COLLECTOR] {msg}", flush=True)
 
 
-def _score_and_store(jobs: list, profile_config: dict, stats: dict, db):
+async def _score_and_store(jobs: list, profile_config: dict, stats: dict, db):
     min_store = int(profile_config.get("scoring", {}).get("min_score_to_store", 20))
     for job in jobs:
         result = score_job(job.title, job.description, job.location, profile_config=profile_config)
@@ -52,7 +52,7 @@ def _score_and_store(jobs: list, profile_config: dict, stats: dict, db):
         job_dict["discovered_at"] = datetime.utcnow().isoformat()
 
         try:
-            result_status = asyncio.run(insert_job(db, job_dict))
+            result_status = await insert_job(db, job_dict)
             if result_status == "inserted":
                 stats["new"] += 1
             else:
@@ -118,7 +118,7 @@ async def run_job_boards(profile_config: dict, db) -> dict:
         all_jobs.extend(jobs)
 
     stats = {"fetched": len(all_jobs), "new": 0, "updated": 0, "filtered_out": 0, "jsearch_used": jsearch_count}
-    _score_and_store(all_jobs, profile_config, stats, db)
+    await _score_and_store(all_jobs, profile_config, stats, db)
 
     # Update API usage in DB
     if jsearch_count > 0:
@@ -162,7 +162,7 @@ async def run_company_crawl(db, profile_config: dict, company_ids: list = None) 
 
     all_jobs = [j for batch in results for j in batch]
     stats = {"fetched": len(all_jobs), "new": 0, "updated": 0, "filtered_out": 0}
-    _score_and_store(all_jobs, profile_config, stats, db)
+    await _score_and_store(all_jobs, profile_config, stats, db)
     return stats
 
 
@@ -170,7 +170,7 @@ async def run_firecrawl_url(url: str, company_name: str, profile_config: dict, d
     src = FirecrawlSource(url=url, company_name=company_name)
     jobs = await _fetch_from_source(src)
     stats = {"fetched": len(jobs), "new": 0, "updated": 0, "filtered_out": 0}
-    _score_and_store(jobs, profile_config, stats, db)
+    await _score_and_store(jobs, profile_config, stats, db)
     return stats
 
 

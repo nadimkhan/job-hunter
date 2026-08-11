@@ -1,7 +1,18 @@
-"""RemoteOK — fully free, no API key needed."""
+"""RemoteOK — fully free, no API key needed.
+Tag-filtered to blockchain/web3 roles only.
+"""
 import httpx
 from sources.base import BaseSource
 from core.models import Job
+
+# Tags that indicate blockchain/web3 roles
+BLOCKCHAIN_TAGS = {
+    "blockchain", "web3", "solidity", "ethereum", "defi", "nft",
+    "smart-contract", "web3.js", "ethers.js", "rust", "crypto",
+    "bitcoin", "cryptocurrency", "dao", "token", "layer-2",
+    "ipfs", "chainlink", "polygon", "avalanche", "solana",
+    "dapp", "DeFi", "NFT", "Web3", "Blockchain",
+}
 
 
 class RemoteOKSource(BaseSource):
@@ -23,8 +34,16 @@ class RemoteOKSource(BaseSource):
         for item in data[1:]:
             if not isinstance(item, dict):
                 continue
+
             tags = item.get("tags", [])
-            tags_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",")]
+            tags_lower = [t.lower().strip() for t in tags]
+            tags_str = ", ".join(tags) if tags else ""
+
+            # Skip jobs without blockchain/web3 tags
+            if not any(tag in BLOCKCHAIN_TAGS for tag in tags_lower):
+                continue
 
             job = Job(
                 title=item.get("position", ""),
@@ -40,5 +59,5 @@ class RemoteOKSource(BaseSource):
             job.id = job.make_fingerprint()
             jobs.append(job)
 
-        self.log(f"Fetched {len(jobs)} jobs")
+        self.log(f"Fetched {len(jobs)} blockchain-tagged jobs")
         return jobs
